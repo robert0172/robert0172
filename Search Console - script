@@ -1,0 +1,121 @@
+function main() {
+  // Spreadsheet URL
+  // Replace 'YOUR_SHEET_URL' with the URL of your Google Sheet.
+  var spreadsheetUrl = 'YOUR_SHEET_URL';
+
+  // Sheet Names
+  // Replace 'YOUR_SHEET_NAME_HERE' with the name of the primary sheet containing search terms.
+  var primarySheetName = 'YOUR_SHEET_NAME_HERE';
+  // Replace 'YOUR_SEPERATE_SHEET_WITH_BRANDNAMES_HERE' with the name of the secondary sheet containing brand names to exclude.
+  var secondarySheetName = 'YOUR_SEPERATE_SHEET_WITH_BRANDNAMES_HERE';
+
+  // Start Rows
+  // Starting row for the primary sheet (containing search terms)
+  var primaryStartRow = 3;
+  // Starting row for the secondary sheet (containing brand names)
+  var secondaryStartRow = 1;
+
+  // Match Types Configuration
+  // Set to true or false depending on whether you want to add keywords as exact, phrase, or broad match.
+  var matchConfig = {
+    exact: true,
+    phrase: true,
+    broad: true
+  };
+
+  // Access the spreadsheet
+  var spreadsheet = SpreadsheetApp.openByUrl(spreadsheetUrl);
+  var primarySheet = spreadsheet.getSheetByName(primarySheetName);
+  var secondarySheet = spreadsheet.getSheetByName(secondarySheetName);
+
+  // Get data from the sheets
+  var primarySearchTerms = getSheetData(primarySheet, primaryStartRow);
+  var secondarySearchTerms = getSheetData(secondarySheet, secondaryStartRow);
+  var existingKeywords = getExistingKeywords();
+  var negativeKeywords = getNegativeKeywords();
+
+  // Filter out duplicates
+  var termsToAdd = primarySearchTerms.filter(function(term) {
+    return secondarySearchTerms.indexOf(term) === -1 &&
+           existingKeywords.indexOf(term) === -1 &&
+           negativeKeywords.indexOf(term) === -1;
+  });
+
+  // Campaign and Ad Group Names
+  // Replace 'YOUR_CAMPAIGN_NAME_HERE' with the name of your campaign.
+  var campaignName = 'YOUR_CAMPAIGN_NAME_HERE';
+  // Replace 'YOUR_AD_GROUP_HERE' with the name of your ad group.
+  var adGroupName = 'YOUR_AD_GROUP_HERE';
+
+  // Retrieve the campaign and ad group
+  var campaign = getCampaignByName(campaignName);
+  var adGroup = getAdGroupByName(campaign, adGroupName);
+
+  // Add keywords to the ad group if it exists
+  if (adGroup) {
+    addKeywordsToAdGroup(adGroup, termsToAdd, matchConfig);
+  } else {
+    Logger.log('Ad group with the name "' + adGroupName + '" does not exist.');
+  }
+}
+
+function getSheetData(sheet, startRow) {
+  var lastRow = sheet.getLastRow();
+  var range = sheet.getRange('A' + startRow + ':A' + lastRow);
+  return range.getValues().map(function(row) {
+    return (typeof row[0] === 'string') ? row[0].trim().toLowerCase() : '';
+  });
+}
+
+function getExistingKeywords() {
+  var keywords = [];
+  var keywordIterator = AdsApp.keywords().get();
+  while (keywordIterator.hasNext()) {
+    var keyword = keywordIterator.next();
+    keywords.push(keyword.getText().toLowerCase());
+  }
+  return keywords;
+}
+
+function getNegativeKeywords() {
+  var negativeKeywords = [];
+  var sharedSetsIterator = AdsApp.negativeKeywordLists().get();
+  while (sharedSetsIterator.hasNext()) {
+    var sharedSet = sharedSetsIterator.next();
+    var negativeKeywordIterator = sharedSet.negativeKeywords().get();
+    while (negativeKeywordIterator.hasNext()) {
+      var negativeKeyword = negativeKeywordIterator.next();
+      negativeKeywords.push(negativeKeyword.getText().toLowerCase());
+    }
+  }
+  return negativeKeywords;
+}
+
+function getCampaignByName(name) {
+  var campaignIterator = AdsApp.campaigns().withCondition('Name = "' + name + '"').get();
+  return campaignIterator.hasNext() ? campaignIterator.next() : null;
+}
+
+function getAdGroupByName(campaign, name) {
+  if (campaign) {
+    var adGroupIterator = campaign.adGroups().withCondition('Name = "' + name + '"').get();
+    return adGroupIterator.hasNext() ? adGroupIterator.next() : null;
+  }
+  return null;
+}
+
+function addKeywordsToAdGroup(adGroup, terms, config) {
+  terms.forEach(function(term) {
+    if (term != "") {
+      if (config.exact) {
+        adGroup.newKeywordBuilder().withText('[' + term + ']').build();
+      }
+      if (config.phrase) {
+        adGroup.newKeywordBuilder().withText('"' + term + '"').build();
+      }
+      if (config.broad) {
+        adGroup.newKeywordBuilder().withText(term).build();
+      }
+    }
+  });
+}
