@@ -1,0 +1,9 @@
+weather-performance
+Introducing a MCC-level script that seamlessly integrates weather data with Google Ads client metrics for analysis and optimization.
+Go to: https://openweathermap.org/api
+Go to your MCC-account and navigate to scripts.
+Add the Google Ads script.
+Add the OPEN_WEATHER_MAP_API_KEY in row 2.
+Add the Client IDs in row 1.
+Copy the spreadsheet url: https://docs.google.com/spreadsheets/d/1KXD6iN0RTqMDLnwOa8Y0R6GtnmiAQYmW-_HAH2DIAZM/copy == make a copy of the spreadsheet. Adjust the: var ss = SpreadsheetApp.openById value to your ID (1KXD6iN0RTqMDLnwOa8Y0R6GtnmiAQYmW-_HAH2DIAZM).
+The client IDs are converted to different tabs. Run the script every day.
