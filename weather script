@@ -1,1 +1,135 @@
+const client_IDs = ['XXX-XXX-XXXX', XXX-XXX-XXXX']
+var OPEN_WEATHER_MAP_API_KEY = '6ec5eb4b0a1907e40cXXXXXXXXXXXXXX';
 
+###https://docs.google.com/spreadsheets/d/1KXD6iN0RTqMDLnwOa8Y0R6GtnmiAQYmW-_HAH2DIAZM/copy
+function main() {
+  var ss = SpreadsheetApp.openById('1KXD6iN0RTqMDLnwOa8Y0R6GtnmiAQYmW-_HAH2DIAZM')
+  var cities_sheet = ss.getSheetByName("Cities")
+  
+  // var dashboard_sheet = ss.getSheetByName("Dashboard")
+  
+  var managerAccount = AdsApp.currentAccount();
+  var accountIterator = AdsManagerApp.accounts().withIds(client_IDs).get();
+  var cities = cities_sheet.getDataRange().getValues();
+  
+  var timezone = ss.getSpreadsheetTimeZone();
+  var date = new Date()
+  date.setDate(date.getDate() - 1);
+  var date_str = Utilities.formatDate(date, timezone, 'yyyy-MM-dd')
+  
+  for(let i = 1; i < cities.length; i++){
+    for (const account of accountIterator) {
+      if(cities[i][0] == '') { continue }
+      
+      var sheet = get_sheet(ss, account.getName())
+      
+      var temp = get_yesterdays_weather(cities[i][0], ss, date_str)
+      // Logger.log(cities[i][0])
+      // Logger.log(temp)
+      
+      AdsManagerApp.select(account);
+      var query = "SELECT metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, " 
+      +"metrics.conversions_value, metrics.cost_per_conversion, metrics.average_cpc " 
+       + "FROM customer WHERE segments.date DURING YESTERDAY"
+
+
+      const report = AdsApp.report(query);
+      var rows = report.rows();
+      while (rows.hasNext()) {
+        var row = rows.next();
+        var cpc = convertMicrosToCurrency(row['metrics.average_cpc'], true)
+        var cost = cpc * row['metrics.clicks'];
+        
+        var cost_per_conver = 0
+
+        if(row['metrics.cost_per_conversion']){
+          cost_per_conver = (row['metrics.cost_per_conversion']/1000000).toFixed(2)
+        }
+        
+        var conversion_rate = ((row['metrics.conversions'].toFixed(2) / row['metrics.clicks']) * 100 ).toFixed(2)
+        
+        var new_row = [cities[i][0], date_str, temp, Math.round(parseFloat(temp)),
+                         row['metrics.impressions'], row['metrics.clicks'], 
+                         cost, row['metrics.conversions'].toFixed(2),
+                         conversion_rate, cost_per_conver, row['metrics.conversions_value'].toFixed(2),
+                         cpc
+                        ]
+        Logger.log(new_row)
+        sheet.appendRow(new_row)
+      }
+      
+    }
+    // Update today's weather of all cities.
+    update_todays_temprature(cities[i][0], ss) 
+  }
+    
+  AdsManagerApp.select(managerAccount);
+}
+
+function get_yesterdays_weather(city, ss, date_str){
+  var sheet = ss.getSheetByName("Weather History")
+  var data = sheet.getDataRange().getDisplayValues();
+  
+  for(let i = 1; i < data.length; i++){
+    if(data[i][0] == city && data[i][1] == date_str){
+      return data[i][2]      
+    }
+  }
+  
+  return 0
+}
+
+function update_todays_temprature(city, ss){
+  var sheet = ss.getSheetByName("Weather History")
+  
+  if(city == ''){
+    return '0'
+  }
+  
+  var url = Utilities.formatString('http://api.openweathermap.org/data/2.5/weather?APPID=%s&q=%s',
+      encodeURIComponent(OPEN_WEATHER_MAP_API_KEY),
+      encodeURIComponent(city));
+                                    
+  try {var response = UrlFetchApp.fetch(url); } catch (err){ Logger.log(err); return '0';}
+
+  var result = JSON.parse(response.getContentText());
+    
+  if (result.cod != 200) {
+    return 0
+  }
+  
+  var timezone = ss.getSpreadsheetTimeZone();
+  var date = new Date()
+  var date_str = Utilities.formatDate(date, timezone, 'yyyy-MM-dd')
+    
+  sheet.appendRow([city, date_str, toCelsius(result.main.temp)])  
+  
+  // return toCelsius(result.main.temp)
+}
+
+function toCelsius(kelvin) {
+  return (kelvin - 273.15);
+}
+
+function convertMicrosToCurrency(micros, rounded) {
+  if (rounded == true) {
+    return Number(Math.round(micros/1000000+'e2')+'e-2'); // returns currency value with 2 decimals
+  } else if (rounded == false)  {
+    return micros/1000000; // returns currency value without any rounding
+  }
+}
+
+function get_sheet(spreadsheet, sheet_name){
+  var sheet = spreadsheet.getSheetByName(sheet_name);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheet_name);
+    
+    sheet.appendRow(["City", "Date", "Temperature (Celsius)",	"Temperture Round", "Impressions", "Clicks", "Cost", "Conversions", "Conversion Rate", "Cost per Conversion", "Conv. value", "Avg. CPC"])
+    sheet.getRange(1, 1, 1, 12).setBackground('#bf73a2')
+    sheet.getRange(1, 1, 1, 12).setFontWeight('bold')
+    sheet.getRange(1, 1, 1, 12).setFontColor('white')
+  }
+  
+
+  return sheet;
+}
