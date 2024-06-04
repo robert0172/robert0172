@@ -1,0 +1,98 @@
+function main() {
+  // INSERT A COPY OF THIS URL
+  // Please make a copy of the spreadsheet at the following URL and replace the URL below with the URL of your copy.
+  var SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1B_Zt7LhZiV08JdNFd7_NLtFuqYxaOU81JJHOwQmx-6A/edit#gid=825291460';
+  
+  var spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  var templateSheet = spreadsheet.getSheets()[0]; // The first sheet is the template
+
+  // Get all search campaigns
+  var campaignIterator = AdsApp.campaigns()
+      .withCondition("AdvertisingChannelType = SEARCH")
+      .withCondition("Status = ENABLED")
+      .get();
+
+  var searchCampaignNames = [];
+  while (campaignIterator.hasNext()) {
+    var campaign = campaignIterator.next();
+    searchCampaignNames.push(campaign.getName());
+  }
+
+  // If there are no search campaigns, exit the script
+  if (searchCampaignNames.length === 0) {
+    return;
+  }
+
+  // Create a string for the AWQL query
+  var campaignNameCondition = "CampaignName IN ['" + searchCampaignNames.join("','") + "']";
+
+  var report = AdsApp.report(
+    'SELECT CampaignName, AdGroupName, Query, QueryMatchTypeWithVariant, Cost, Conversions ' +
+    'FROM SEARCH_QUERY_PERFORMANCE_REPORT ' +
+    'WHERE Cost > 0 AND CampaignStatus = ENABLED AND AdGroupStatus = ENABLED AND ' + campaignNameCondition +
+    ' DURING LAST_30_DAYS');
+
+  var rows = report.rows();
+  var data = [];
+  var matchTypeData = {
+    'broad': [],
+    'exact': [],
+    'phrase': []
+  };
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var campaignName = row['CampaignName'];
+    var adGroupName = row['AdGroupName'];
+    var query = row['Query'];
+    var matchType = row['QueryMatchTypeWithVariant'];
+    var costLast30Days = row['Cost'];
+    var conversionsLast30Days = row['Conversions'];
+
+    data.push([campaignName, adGroupName, query, matchType, costLast30Days, conversionsLast30Days]);
+      
+    if (matchType === 'broad') {
+      matchTypeData['broad'].push([campaignName, costLast30Days, conversionsLast30Days]);
+    } else if (matchType === 'exact' || matchType === 'exact (close variant)') {
+      matchTypeData['exact'].push([campaignName, costLast30Days, conversionsLast30Days]);
+    } else if (matchType === 'phrase' || matchType === 'phrase (close variant)') {
+      matchTypeData['phrase'].push([campaignName, costLast30Days, conversionsLast30Days]);
+    }
+  }
+
+  // Sort data by conversions (column index 5) in descending order and then by cost (column index 4) in descending order
+  data.sort(function(a, b) {
+    if (parseFloat(b[5]) === parseFloat(a[5])) {
+      return parseFloat(b[4]) - parseFloat(a[4]);
+    } else {
+      return parseFloat(b[5]) - parseFloat(a[5]);
+    }
+  });
+
+  // Write data to sheets
+  for (var i = 0; i < data.length; i++) {
+    var campaignName = data[i][0];
+    var sheet = spreadsheet.getSheetByName(campaignName);
+    if (!sheet) {
+      // If the sheet does not exist, copy the template and rename it
+      sheet = templateSheet.copyTo(spreadsheet);
+      sheet.setName(campaignName);
+    }
+    sheet.appendRow(data[i]);
+  }
+
+  // Add totals row to each sheet
+  var allSheets = spreadsheet.getSheets();
+  for (var i = 0; i < allSheets.length; i++) {
+    var sheet = allSheets[i];
+    var lastRow = sheet.getLastRow();
+    var lastColumn = sheet.getLastColumn();
+    for (var j = 5; j <= lastColumn; j++) {
+      sheet.getRange(lastRow, j).setFormula('=SUM(' + sheet.getRange(2, j).getA1Notation() + ':' + sheet.getRange(lastRow - 1, j).getA1Notation() + ')');
+    }
+    // Merge cells and set "TOTALES" text
+    var totalsRange = sheet.getRange(lastRow, 1, 1, 4);
+    totalsRange.merge();
+    totalsRange.setValue('TOTALES');
+    totalsRange.setFontWeight('bold');
+  }
+}
