@@ -1,0 +1,164 @@
+/*
+Google Ads Script: Landing Page Change Monitor (MCC Level)
+
+Instructions:
+1. Copy this entire script and paste it into your Google Ads MCC-level script editor.
+2. In the CONFIG object, replace the 'masterSheetUrl' with the URL of your master Google Spreadsheet.
+3. Save the script.
+4. Run the script manually to test it, or set up a schedule for automated running.
+
+Master Spreadsheet Structure:
+Column A: ACCOUNT ID
+Column B: CAMPAIGN LABEL
+Column C: EMAIL ADDRESSES (comma-separated for multiple recipients)
+Column D: REPORT URL (URL of the Google Spreadsheet for each account's landing page data)
+Column E: LastRun in MCCTIME (automatically updated by the script)
+Column F: Error message (if any, automatically updated by the script)
+
+This script will:
+- Read account data from the master spreadsheet.
+- For each account, fetch landing page URLs from the specified report spreadsheet.
+- Check the H1 tag and a specific form-control element on each landing page.
+- Compare the current content with the previously recorded content.
+- Update the report spreadsheet with changes, including:
+  - Whether there was a change (yes/no) in column B.
+  - The previous H1 tag in column C.
+  - The current H1 tag in column D.
+  - A description of changes in column E.
+  - The last run time in column F.
+  - Whether the H1 changed (yes/no) in column G, highlighted in red if changed.
+- Send an email alert to the specified addresses with a summary of changes.
+- Update the master spreadsheet with the last run time and any error messages.
+
+Note: Make sure you have the necessary permissions to access all accounts and spreadsheets.
+The script processes URLs in batches and limits the number of URLs per account to optimize performance.
+*/
+
+const CONFIG = {
+  masterSheetUrl: "https://docs.google.com/spreadsheets/d/1_G8qinEPKf0rvb8gJzPHIShVtwpqnAWvyWJsU50Qc9o/edit?gid=2026234676#gid=2026234676",
+  masterSheetName: "LandingPageChange",
+  maxUrlsPerAccount: 100,  // Beperk het aantal URL's per account
+  batchSize: 20  // Aantal URL's om in één keer te verwerken
+};
+
+function main() {
+  const masterSheet = SpreadsheetApp.openByUrl(CONFIG.masterSheetUrl).getSheetByName(CONFIG.masterSheetName);
+  if (!masterSheet) throw new Error("Mastersheet not found");
+  
+  const accountData = masterSheet.getDataRange().getValues().slice(1); // Skip header
+
+  for (let i = 0; i < accountData.length; i++) {
+    const [accountId, campaignLabel, emailAddresses, reportUrl] = accountData[i];
+    if (!accountId || !campaignLabel || !emailAddresses || !reportUrl) continue;
+
+    try {
+      const results = processAccount(accountId, campaignLabel, reportUrl);
+      if (results.length > 0) {
+        sendSummaryEmail(results, accountId, emailAddresses.split(','));
+      }
+      masterSheet.getRange(i + 2, 5).setValue(new Date().toISOString());
+      masterSheet.getRange(i + 2, 6).setValue("");
+    } catch (e) {
+      Logger.log(`Error processing account ${accountId}: ${e.message}`);
+      masterSheet.getRange(i + 2, 6).setValue(e.message);
+    }
+  }
+}
+
+function processAccount(accountId, campaignLabel, reportUrl) {
+  const reportSheet = SpreadsheetApp.openByUrl(reportUrl).getActiveSheet();
+  const lastRow = Math.max(reportSheet.getLastRow(), 1);
+  
+  if (lastRow === 1) {
+    reportSheet.getRange(1, 1, 1, 7).setValues([["Landingpagina", "Change yes or no", "h1 wat het was", "h1 wat het nu is", "Wat voor wijziging", "LastRun", "H1 Changed"]]);
+    return [];
+  }
+
+  const data = reportSheet.getRange(2, 1, Math.min(lastRow - 1, CONFIG.maxUrlsPerAccount), 7).getValues();
+  const results = [];
+  
+  for (let i = 0; i < data.length; i += CONFIG.batchSize) {
+    const batch = data.slice(i, i + CONFIG.batchSize);
+    const batchResults = batch.map((row, index) => checkUrl(row, index + i + 2, reportSheet)).filter(Boolean);
+    results.push(...batchResults);
+    
+    // Geef de script engine tijd om te ademen
+    if (i + CONFIG.batchSize < data.length) {
+      Utilities.sleep(1000);
+    }
+  }
+
+  return results;
+}
+
+function checkUrl(row, rowIndex, sheet) {
+  const [url, , oldH1, , , lastRun] = row;
+  if (!url) return null;
+
+  try {
+    const response = UrlFetchApp.fetch(url, {muteHttpExceptions: true, followRedirects: true});
+    
+    if (response.getResponseCode() !== 200) {
+      const result = { url, changed: "error", oldH1, newH1: oldH1, difference: `Failed with status ${response.getResponseCode()}`, h1Changed: "no" };
+      updateRow(sheet, rowIndex, ["error", oldH1, oldH1, result.difference, new Date().toISOString(), "no"]);
+      return result;
+    }
+    
+    const pageHtml = response.getContentText();
+    const currentH1 = extractH1(pageHtml);
+    const formControlContent = extractFormControlContent(pageHtml);
+    
+    const h1Changed = (oldH1 && oldH1 !== currentH1) ? "yes" : "no";
+    const changed = h1Changed === "yes" ? "yes" : "no";
+    const difference = h1Changed === "yes" 
+      ? `H1 changed from "${oldH1}" to "${currentH1}"`
+      : `No change in H1. Current form-control content: ${formControlContent}`;
+
+    const result = { url, changed, oldH1: oldH1 || currentH1, newH1: currentH1, difference, h1Changed };
+    updateRow(sheet, rowIndex, [changed, oldH1 || currentH1, currentH1, difference, new Date().toISOString(), h1Changed]);
+
+    if (h1Changed === "yes") {
+      sheet.getRange(rowIndex, 7).setFontColor("red").setFontWeight("bold");
+    } else {
+      sheet.getRange(rowIndex, 7).setFontColor("black").setFontWeight("normal");
+    }
+
+    return result;
+  } catch (e) {
+    const result = { url, changed: "error", oldH1, newH1: oldH1, difference: e.message, h1Changed: "no" };
+    updateRow(sheet, rowIndex, ["error", oldH1, oldH1, e.message, new Date().toISOString(), "no"]);
+    return result;
+  }
+}
+
+function updateRow(sheet, rowIndex, values) {
+  sheet.getRange(rowIndex, 2, 1, 6).setValues([values]);
+}
+
+function extractH1(html) {
+  const match = html.match(/<h1[^>]*>(.*?)<\/h1>/i);
+  return match ? match[1].replace(/<[^>]+>/g, '').trim() : "Geen H1 gevonden";
+}
+
+function extractFormControlContent(html) {
+  const classToCheck = "form-control upper ng-pristine ng-valid ng-empty ng-touched";
+  const match = html.match(new RegExp(`<[^>]*class="[^"]*${classToCheck}[^"]*"[^>]*>([\s\S]*?)<\/[^>]*>`, 'i'));
+  return match ? match[1].trim() : "Geen form-control element gevonden";
+}
+
+function sendSummaryEmail(results, accountId, emailAddresses) {
+  const subject = `Landing Page Change Monitor Report - Account ${accountId}`;
+  let body = `Summary of landing pages checked for account ${accountId}:\n\n`;
+  
+  results.forEach(result => {
+    body += `URL: ${result.url}\n`;
+    body += `Changed: ${result.changed}\n`;
+    body += `Old H1: ${result.oldH1}\n`;
+    body += `New H1: ${result.newH1}\n`;
+    body += `Difference: ${result.difference}\n`;
+    body += `H1 Changed: ${result.h1Changed}\n`;
+    body += "--------------------------------------\n";
+  });
+
+  MailApp.sendEmail(emailAddresses.join(','), subject, body);
+}
