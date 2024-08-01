@@ -37,70 +37,97 @@ The script processes URLs in batches and limits the number of URLs per account t
 const CONFIG = {
   masterSheetUrl: "https://docs.google.com/spreadsheets/d/1_G8qinEPKf0rvb8gJzPHIShVtwpqnAWvyWJsU50Qc9o/edit?gid=2026234676#gid=2026234676",
   masterSheetName: "LandingPageChange",
-  maxUrlsPerAccount: 100,  // Beperk het aantal URL's per account
-  batchSize: 20  // Aantal URL's om in één keer te verwerken
+  maxUrlsPerAccount: 100,
+  batchSize: 10,
+  accountsPerRun: 5,
+  queueColumnIndex: 7
 };
 
+function logMessage(message) {
+  Logger.log(message);
+}
+
 function main() {
+  logMessage("Starting script execution");
   const masterSheet = SpreadsheetApp.openByUrl(CONFIG.masterSheetUrl).getSheetByName(CONFIG.masterSheetName);
   if (!masterSheet) throw new Error("Mastersheet not found");
   
-  const accountData = masterSheet.getDataRange().getValues().slice(1); // Skip header
-
-  for (let i = 0; i < accountData.length; i++) {
-    const [accountId, campaignLabel, emailAddresses, reportUrl] = accountData[i];
-    if (!accountId || !campaignLabel || !emailAddresses || !reportUrl) continue;
-
+  const accountData = masterSheet.getDataRange().getValues().slice(1);
+  
+  let processedAccounts = 0;
+  
+  for (let i = 0; i < accountData.length && processedAccounts < CONFIG.accountsPerRun; i++) {
+    const [accountId, campaignLabel, emailAddresses, reportUrl, , , queueStatus] = accountData[i];
+    if (!accountId || !campaignLabel || !emailAddresses || !reportUrl) {
+      logMessage(`Skipping row ${i + 2} due to missing data`);
+      continue;
+    }
+    
     try {
+      logMessage(`Processing account ${accountId}`);
       const results = processAccount(accountId, campaignLabel, reportUrl);
       if (results.length > 0) {
         sendSummaryEmail(results, accountId, emailAddresses.split(','));
       }
       masterSheet.getRange(i + 2, 5).setValue(new Date().toISOString());
       masterSheet.getRange(i + 2, 6).setValue("");
+      processedAccounts++;
+      logMessage(`Finished processing account ${accountId}`);
     } catch (e) {
-      Logger.log(`Error processing account ${accountId}: ${e.message}`);
+      logMessage(`Error processing account ${accountId}: ${e.message}`);
       masterSheet.getRange(i + 2, 6).setValue(e.message);
     }
   }
+  
+  logMessage("Script execution completed");
 }
 
 function processAccount(accountId, campaignLabel, reportUrl) {
+  logMessage(`Starting to process account: ${accountId}`);
   const reportSheet = SpreadsheetApp.openByUrl(reportUrl).getActiveSheet();
   const lastRow = Math.max(reportSheet.getLastRow(), 1);
+  
+  logMessage(`Found ${lastRow - 1} rows of data for account ${accountId}`);
   
   if (lastRow === 1) {
     reportSheet.getRange(1, 1, 1, 7).setValues([["Landingpagina", "Change yes or no", "h1 wat het was", "h1 wat het nu is", "Wat voor wijziging", "LastRun", "H1 Changed"]]);
     return [];
   }
 
-  const data = reportSheet.getRange(2, 1, Math.min(lastRow - 1, CONFIG.maxUrlsPerAccount), 7).getValues();
   const results = [];
   
-  for (let i = 0; i < data.length; i += CONFIG.batchSize) {
-    const batch = data.slice(i, i + CONFIG.batchSize);
-    const batchResults = batch.map((row, index) => checkUrl(row, index + i + 2, reportSheet)).filter(Boolean);
-    results.push(...batchResults);
+  for (let i = 2; i <= Math.min(lastRow, CONFIG.maxUrlsPerAccount + 1); i++) {
+    const row = reportSheet.getRange(i, 1, 1, 7).getValues()[0];
+    const result = checkUrl(row, i, reportSheet);
+    if (result) {
+      results.push(result);
+    }
     
-    // Geef de script engine tijd om te ademen
-    if (i + CONFIG.batchSize < data.length) {
+    if ((i - 1) % CONFIG.batchSize === 0) {
       Utilities.sleep(1000);
     }
   }
 
+  logMessage(`Finished processing account ${accountId}. Found ${results.length} changes.`);
   return results;
 }
 
 function checkUrl(row, rowIndex, sheet) {
-  const [url, , oldH1, , , lastRun] = row;
-  if (!url) return null;
+  const [url, , oldH1Stored, , , lastRun] = row;
+  if (!url) {
+    logMessage(`No URL found in row ${rowIndex}`);
+    return null;
+  }
+
+  logMessage(`Checking URL: ${url}`);
 
   try {
     const response = UrlFetchApp.fetch(url, {muteHttpExceptions: true, followRedirects: true});
     
     if (response.getResponseCode() !== 200) {
-      const result = { url, changed: "error", oldH1, newH1: oldH1, difference: `Failed with status ${response.getResponseCode()}`, h1Changed: "no" };
-      updateRow(sheet, rowIndex, ["error", oldH1, oldH1, result.difference, new Date().toISOString(), "no"]);
+      const result = { url, changed: "error", oldH1: oldH1Stored, newH1: oldH1Stored, difference: `Failed with status ${response.getResponseCode()}`, h1Changed: "no" };
+      updateRow(sheet, rowIndex, ["error", oldH1Stored, oldH1Stored, result.difference, new Date().toISOString(), "no"]);
+      logMessage(`Error fetching ${url}: ${result.difference}`);
       return result;
     }
     
@@ -108,30 +135,44 @@ function checkUrl(row, rowIndex, sheet) {
     const currentH1 = extractH1(pageHtml);
     const formControlContent = extractFormControlContent(pageHtml);
     
-    const h1Changed = (oldH1 && oldH1 !== currentH1) ? "yes" : "no";
+    const h1Changed = (oldH1Stored && oldH1Stored !== currentH1) ? "yes" : "no";
     const changed = h1Changed === "yes" ? "yes" : "no";
     const difference = h1Changed === "yes" 
-      ? `H1 changed from "${oldH1}" to "${currentH1}"`
+      ? `H1 changed from "${oldH1Stored}" to "${currentH1}"`
       : `No change in H1. Current form-control content: ${formControlContent}`;
 
-    const result = { url, changed, oldH1: oldH1 || currentH1, newH1: currentH1, difference, h1Changed };
-    updateRow(sheet, rowIndex, [changed, oldH1 || currentH1, currentH1, difference, new Date().toISOString(), h1Changed]);
+    const result = { url, changed, oldH1: oldH1Stored, newH1: currentH1, difference, h1Changed };
+    
+    // Altijd de huidige H1 opslaan als de nieuwe "h1 wat het was"
+    const updateValues = [
+      changed, 
+      currentH1,  // Update "h1 wat het was" met de huidige H1
+      currentH1, 
+      difference, 
+      new Date().toISOString(), 
+      h1Changed
+    ];
+    updateRow(sheet, rowIndex, updateValues);
 
     if (h1Changed === "yes") {
+      logMessage(`H1 changed for ${url}. Old: "${oldH1Stored}", New: "${currentH1}"`);
       sheet.getRange(rowIndex, 7).setFontColor("red").setFontWeight("bold");
     } else {
+      logMessage(`No change for ${url}`);
       sheet.getRange(rowIndex, 7).setFontColor("black").setFontWeight("normal");
     }
 
     return result;
   } catch (e) {
-    const result = { url, changed: "error", oldH1, newH1: oldH1, difference: e.message, h1Changed: "no" };
-    updateRow(sheet, rowIndex, ["error", oldH1, oldH1, e.message, new Date().toISOString(), "no"]);
+    logMessage(`Error checking ${url}: ${e.message}`);
+    const result = { url, changed: "error", oldH1: oldH1Stored, newH1: oldH1Stored, difference: e.message, h1Changed: "no" };
+    updateRow(sheet, rowIndex, ["error", oldH1Stored, oldH1Stored, e.message, new Date().toISOString(), "no"]);
     return result;
   }
 }
 
 function updateRow(sheet, rowIndex, values) {
+  logMessage(`Updating row ${rowIndex} with values: ${JSON.stringify(values)}`);
   sheet.getRange(rowIndex, 2, 1, 6).setValues([values]);
 }
 
@@ -147,6 +188,7 @@ function extractFormControlContent(html) {
 }
 
 function sendSummaryEmail(results, accountId, emailAddresses) {
+  logMessage(`Sending summary email for account ${accountId}`);
   const subject = `Landing Page Change Monitor Report - Account ${accountId}`;
   let body = `Summary of landing pages checked for account ${accountId}:\n\n`;
   
@@ -161,4 +203,5 @@ function sendSummaryEmail(results, accountId, emailAddresses) {
   });
 
   MailApp.sendEmail(emailAddresses.join(','), subject, body);
+  logMessage(`Email sent for account ${accountId}`);
 }
