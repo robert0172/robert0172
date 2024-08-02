@@ -40,7 +40,8 @@ const CONFIG = {
   maxUrlsPerAccount: 100,
   batchSize: 10,
   accountsPerRun: 5,
-  queueColumnIndex: 7
+  queueColumnIndex: 7,
+  postcodeColumnIndex: 8  // Dit is kolom H
 };
 
 function logMessage(message) {
@@ -65,10 +66,7 @@ function main() {
     
     try {
       logMessage(`Processing account ${accountId}`);
-      const results = processAccount(accountId, campaignLabel, reportUrl);
-      if (results.length > 0) {
-        sendSummaryEmail(results, accountId, emailAddresses.split(','));
-      }
+      processAccount(accountId, campaignLabel, reportUrl, emailAddresses);
       masterSheet.getRange(i + 2, 5).setValue(new Date().toISOString());
       masterSheet.getRange(i + 2, 6).setValue("");
       processedAccounts++;
@@ -82,7 +80,7 @@ function main() {
   logMessage("Script execution completed");
 }
 
-function processAccount(accountId, campaignLabel, reportUrl) {
+function processAccount(accountId, campaignLabel, reportUrl, emailAddresses) {
   logMessage(`Starting to process account: ${accountId}`);
   const reportSheet = SpreadsheetApp.openByUrl(reportUrl).getActiveSheet();
   const lastRow = Math.max(reportSheet.getLastRow(), 1);
@@ -90,14 +88,14 @@ function processAccount(accountId, campaignLabel, reportUrl) {
   logMessage(`Found ${lastRow - 1} rows of data for account ${accountId}`);
   
   if (lastRow === 1) {
-    reportSheet.getRange(1, 1, 1, 7).setValues([["Landingpagina", "Change yes or no", "h1 wat het was", "h1 wat het nu is", "Wat voor wijziging", "LastRun", "H1 Changed"]]);
+    reportSheet.getRange(1, 1, 1, CONFIG.postcodeColumnIndex).setValues([["Landingpagina", "Change yes or no", "h1 wat het was", "h1 wat het nu is", "Wat voor wijziging", "LastRun", "H1 Changed", "Postcode present"]]);
     return [];
   }
 
   const results = [];
   
   for (let i = 2; i <= Math.min(lastRow, CONFIG.maxUrlsPerAccount + 1); i++) {
-    const row = reportSheet.getRange(i, 1, 1, 7).getValues()[0];
+    const row = reportSheet.getRange(i, 1, 1, CONFIG.postcodeColumnIndex).getValues()[0];
     const result = checkUrl(row, i, reportSheet);
     if (result) {
       results.push(result);
@@ -108,7 +106,8 @@ function processAccount(accountId, campaignLabel, reportUrl) {
     }
   }
 
-  logMessage(`Finished processing account ${accountId}. Found ${results.length} changes.`);
+  logMessage(`Finished processing account ${accountId}. Found ${results.length} total checks.`);
+  sendSummaryEmail(results, accountId, emailAddresses.split(','));
   return results;
 }
 
@@ -125,32 +124,35 @@ function checkUrl(row, rowIndex, sheet) {
     const response = UrlFetchApp.fetch(url, {muteHttpExceptions: true, followRedirects: true});
     
     if (response.getResponseCode() !== 200) {
-      const result = { url, changed: "error", oldH1: oldH1Stored, newH1: oldH1Stored, difference: `Failed with status ${response.getResponseCode()}`, h1Changed: "no" };
-      updateRow(sheet, rowIndex, ["error", oldH1Stored, oldH1Stored, result.difference, new Date().toISOString(), "no"]);
+      const result = { url, changed: "error", oldH1: oldH1Stored, newH1: oldH1Stored, difference: `Failed with status ${response.getResponseCode()}`, h1Changed: "no", postcodePresent: "no" };
+      updateRow(sheet, rowIndex, ["error", oldH1Stored, oldH1Stored, result.difference, new Date().toISOString(), "no", "no"]);
       logMessage(`Error fetching ${url}: ${result.difference}`);
       return result;
     }
     
     const pageHtml = response.getContentText();
+    logMessage(`First 200 characters of ${url}: ${pageHtml.substring(0, 200)}`);
     const currentH1 = extractH1(pageHtml);
-    const formControlContent = extractFormControlContent(pageHtml);
+    const postcodePresent = checkPostcodePresence(pageHtml);
+    
+    logMessage(`URL: ${url}, H1: ${currentH1}, Postcode present: ${postcodePresent}`);
     
     const h1Changed = (oldH1Stored && oldH1Stored !== currentH1) ? "yes" : "no";
     const changed = h1Changed === "yes" ? "yes" : "no";
     const difference = h1Changed === "yes" 
       ? `H1 changed from "${oldH1Stored}" to "${currentH1}"`
-      : `No change in H1. Current form-control content: ${formControlContent}`;
+      : `No change in H1.`;
 
-    const result = { url, changed, oldH1: oldH1Stored, newH1: currentH1, difference, h1Changed };
+    const result = { url, changed, oldH1: oldH1Stored, newH1: currentH1, difference, h1Changed, postcodePresent };
     
-    // Altijd de huidige H1 opslaan als de nieuwe "h1 wat het was"
     const updateValues = [
       changed, 
-      currentH1,  // Update "h1 wat het was" met de huidige H1
+      currentH1,
       currentH1, 
       difference, 
       new Date().toISOString(), 
-      h1Changed
+      h1Changed,
+      postcodePresent
     ];
     updateRow(sheet, rowIndex, updateValues);
 
@@ -162,18 +164,24 @@ function checkUrl(row, rowIndex, sheet) {
       sheet.getRange(rowIndex, 7).setFontColor("black").setFontWeight("normal");
     }
 
+    if (postcodePresent === "no") {
+      sheet.getRange(rowIndex, CONFIG.postcodeColumnIndex).setFontColor("red").setFontWeight("bold");
+    } else {
+      sheet.getRange(rowIndex, CONFIG.postcodeColumnIndex).setFontColor("black").setFontWeight("normal");
+    }
+
     return result;
   } catch (e) {
     logMessage(`Error checking ${url}: ${e.message}`);
-    const result = { url, changed: "error", oldH1: oldH1Stored, newH1: oldH1Stored, difference: e.message, h1Changed: "no" };
-    updateRow(sheet, rowIndex, ["error", oldH1Stored, oldH1Stored, e.message, new Date().toISOString(), "no"]);
+    const result = { url, changed: "error", oldH1: oldH1Stored, newH1: oldH1Stored, difference: e.message, h1Changed: "no", postcodePresent: "no" };
+    updateRow(sheet, rowIndex, ["error", oldH1Stored, oldH1Stored, e.message, new Date().toISOString(), "no", "no"]);
     return result;
   }
 }
 
 function updateRow(sheet, rowIndex, values) {
   logMessage(`Updating row ${rowIndex} with values: ${JSON.stringify(values)}`);
-  sheet.getRange(rowIndex, 2, 1, 6).setValues([values]);
+  sheet.getRange(rowIndex, 2, 1, CONFIG.postcodeColumnIndex - 1).setValues([values]);
 }
 
 function extractH1(html) {
@@ -181,26 +189,62 @@ function extractH1(html) {
   return match ? match[1].replace(/<[^>]+>/g, '').trim() : "Geen H1 gevonden";
 }
 
-function extractFormControlContent(html) {
-  const classToCheck = "form-control upper ng-pristine ng-valid ng-empty ng-touched";
-  const match = html.match(new RegExp(`<[^>]*class="[^"]*${classToCheck}[^"]*"[^>]*>([\s\S]*?)<\/[^>]*>`, 'i'));
-  return match ? match[1].trim() : "Geen form-control element gevonden";
+function checkPostcodePresence(html) {
+  logMessage("Checking postcode presence at the top of the page");
+
+  // Neem de eerste 5000 tekens van de HTML (dit zou een groter deel van de bovenkant van de pagina moeten zijn)
+  const topOfPage = html.substring(0, 5000);
+
+  // Log de eerste 200 tekens voor debugging
+  logMessage("First 200 characters of the page: " + topOfPage.substring(0, 200));
+
+  // Verschillende mogelijke patronen voor postcode-gerelateerde tekst
+  const postcodePatterns = [
+    /wat is (je|uw) postcode/i,
+    /vul (je|uw) postcode in/i,
+    /postcode/i,
+    /zipcode/i,
+    /postal code/i
+  ];
+
+  for (let pattern of postcodePatterns) {
+    const match = topOfPage.match(pattern);
+    if (match) {
+      logMessage(`Found postcode-related text: "${match[0]}"`);
+      return "yes";
+    }
+  }
+
+  logMessage("No postcode-related text found at the top of the page");
+  return "no";
 }
 
 function sendSummaryEmail(results, accountId, emailAddresses) {
-  logMessage(`Sending summary email for account ${accountId}`);
+  logMessage(`Preparing summary email for account ${accountId}`);
   const subject = `Landing Page Change Monitor Report - Account ${accountId}`;
-  let body = `Summary of landing pages checked for account ${accountId}:\n\n`;
   
-  results.forEach(result => {
-    body += `URL: ${result.url}\n`;
-    body += `Changed: ${result.changed}\n`;
-    body += `Old H1: ${result.oldH1}\n`;
-    body += `New H1: ${result.newH1}\n`;
-    body += `Difference: ${result.difference}\n`;
-    body += `H1 Changed: ${result.h1Changed}\n`;
-    body += "--------------------------------------\n";
-  });
+  // Filter resultaten op relevante wijzigingen
+  const relevantChanges = results.filter(result => result.h1Changed === "yes" || result.postcodePresent === "no");
+  
+  let body;
+  if (relevantChanges.length > 0) {
+    body = `Belangrijke wijzigingen gevonden voor account ${accountId}:\n\n`;
+    
+    relevantChanges.forEach(result => {
+      body += `URL: ${result.url}\n`;
+      body += `H1 tag controle: ${result.h1Changed === "yes" ? "Gewijzigd" : "Ongewijzigd"}\n`;
+      body += `Postcode aanwezig: ${result.postcodePresent === "yes" ? "Ja" : "Nee"}\n`;
+      if (result.h1Changed === "yes") {
+        body += `H1 gewijzigd: Oud: "${result.oldH1}", Nieuw: "${result.newH1}"\n`;
+      }
+      if (result.postcodePresent === "no") {
+        body += `Waarschuwing: Postcode vraag niet gevonden bovenaan de pagina\n`;
+      }
+      body += "--------------------------------------\n";
+    });
+  } else {
+    body = `Alles ziet er goed uit voor account ${accountId}. Er zijn geen H1 tags gewijzigd en de postcode vraag is aanwezig bovenaan de pagina. Je kunt met een opgelucht hart naar je volgende taak gaan.`;
+  }
 
   MailApp.sendEmail(emailAddresses.join(','), subject, body);
   logMessage(`Email sent for account ${accountId}`);
