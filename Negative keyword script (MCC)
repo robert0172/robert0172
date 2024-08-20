@@ -1,0 +1,297 @@
+/**
+ * @name Negative Keyword Conflicts - Manager Accounts
+ * @overview The Negative Keyword Conflicts script generates a spreadsheet
+ *     and email alert if a Google Ads account has positive keywords which are
+ *     blocked by negative keywords.
+ * @version 3.3
+ */
+
+const CONFIG = {
+  masterSheetUrl: "https://docs.google.com/spreadsheets/d/1_G8qinEPKf0rvb8gJzPHIShVtwpqnAWvyWJsU50Qc9o/edit?gid=727724223#gid=727724223",
+  masterSheetName: "NegativeConflicts",
+  MAX_POSITIVES: 250000,
+  MAX_NEGATIVES: 50000
+};
+
+function main() {
+  const masterSheet = SpreadsheetApp.openByUrl(CONFIG.masterSheetUrl).getSheetByName(CONFIG.masterSheetName);
+  if (!masterSheet) throw new Error("Mastersheet not found");
+
+  const accountData = masterSheet.getDataRange().getValues().slice(1);
+  
+  accountData.forEach((row, i) => {
+    const [accountId, campaignLabel, emailAddresses, reportUrl] = row;
+    
+    if (reportUrl) {
+      try {
+        console.log(`Processing account ${accountId}`);
+        processAccount(accountId, campaignLabel, reportUrl, emailAddresses);
+        masterSheet.getRange(i + 2, 5).setValue(new Date().toISOString());
+        masterSheet.getRange(i + 2, 6).setValue("Processed");
+      } catch (e) {
+        console.error(`Error processing account ${accountId}: ${e.message}`);
+        masterSheet.getRange(i + 2, 6).setValue(`Error: ${e.message}`);
+      }
+    }
+  });
+}
+
+function processAccount(accountId, campaignLabel, reportUrl, emailAddresses) {
+  const accountIterator = AdsManagerApp.accounts().withIds([accountId]).get();
+  if (!accountIterator.hasNext()) throw new Error(`Account not found: ${accountId}`);
+
+  const account = accountIterator.next();
+  AdsManagerApp.select(account);
+
+  const conflicts = findAllConflicts(campaignLabel);
+  if (conflicts.length > 0) {
+    saveConflictsToSpreadsheet(conflicts, reportUrl, account.getCustomerId());
+    sendEmail(conflicts, accountId, emailAddresses, reportUrl);
+  }
+}
+
+function findAllConflicts(campaignLabel) {
+  const campaignIds = campaignLabel ? getCampaignIdsWithLabel(campaignLabel) : getAllCampaignIds();
+  if (!campaignIds || campaignIds.length === 0) throw new Error(`No campaigns found for label: ${campaignLabel}`);
+
+  const campaignCondition = campaignIds.length > 0 ? `AND campaign.id IN (${campaignIds.join(',')})` : '';
+
+  Logger.log('Downloading keywords performance report');
+  const query =
+      `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ` +
+      `ad_group_criterion.keyword.text, ` +
+      `ad_group_criterion.keyword.match_type, ` +
+      `ad_group_criterion.negative FROM keyword_view ` +
+      `WHERE campaign.status = "ENABLED" AND ad_group.status = "ENABLED" `+
+      `AND ad_group_criterion.status = "ENABLED" ` +
+      `${campaignCondition} AND segments.date DURING LAST_30_DAYS`;
+  const report = AdsApp.report(query);
+
+  const cache = {};
+  let numPositives = 0;
+  let numNegatives = 0;
+
+  const rows = report.rows();
+  while (rows.hasNext()) {
+    const row = rows.next();
+    const campaignId = row['campaign.id'];
+    const campaignName = row['campaign.name'];
+    const adGroupId = row['ad_group.id'];
+    const adGroupName = row['ad_group.name'];
+    const keywordText = row['ad_group_criterion.keyword.text'];
+    const keywordMatchType = row['ad_group_criterion.keyword.match_type'];
+    const isNegative = row['ad_group_criterion.negative'] === 'true';
+
+    if (!cache[campaignId]) {
+      cache[campaignId] = {
+        campaignName: campaignName,
+        adGroups: {},
+        negatives: [],
+        negativesFromLists: [],
+      };
+    }
+
+    if (!cache[campaignId].adGroups[adGroupId]) {
+      cache[campaignId].adGroups[adGroupId] = {
+        adGroupName: adGroupName,
+        positives: [],
+        negatives: [],
+      };
+    }
+
+    if (isNegative) {
+      cache[campaignId].adGroups[adGroupId].negatives
+        .push(normalizeKeyword(keywordText, keywordMatchType));
+      numNegatives++;
+    } else {
+      cache[campaignId].adGroups[adGroupId].positives
+        .push(normalizeKeyword(keywordText, keywordMatchType));
+      numPositives++;
+    }
+
+    if (numPositives > CONFIG.MAX_POSITIVES || numNegatives > CONFIG.MAX_NEGATIVES) {
+      throw new Error('Trying to process too many keywords. Please restrict the script to a smaller subset of campaigns.');
+    }
+  }
+
+  Logger.log('Downloading campaign negatives report');
+  const campaignNegativesQuery =
+      `SELECT campaign.id, campaign_criterion.keyword.text, ` +
+      `campaign_criterion.keyword.match_type FROM campaign_criterion ` +
+      `WHERE campaign_criterion.negative = true AND ` +
+      `campaign_criterion.type = "KEYWORD" AND ` +
+      `campaign.status = "ENABLED" ${campaignCondition}`;
+  const campaignNegativesReport = AdsApp.report(campaignNegativesQuery);
+
+  const campaignNegativesRows = campaignNegativesReport.rows();
+  while (campaignNegativesRows.hasNext()) {
+    const row = campaignNegativesRows.next();
+    const campaignId = row['campaign.id'];
+    const keywordText = row['campaign_criterion.keyword.text'];
+    const keywordMatchType = row['campaign_criterion.keyword.match_type'];
+
+    if (cache[campaignId]) {
+      cache[campaignId].negatives
+        .push(normalizeKeyword(keywordText, keywordMatchType));
+    }
+  }
+
+  Logger.log('Populating cache with negative keyword lists');
+  const negativeKeywordLists =
+    AdsApp.negativeKeywordLists().withCondition('Status = ACTIVE').get();
+
+  while (negativeKeywordLists.hasNext()) {
+    const negativeKeywordList = negativeKeywordLists.next();
+    const negativeList = {name: negativeKeywordList.getName(), negatives: []};
+    const negativeKeywords = negativeKeywordList.negativeKeywords().get();
+
+    while (negativeKeywords.hasNext()) {
+      const negative = negativeKeywords.next();
+      negativeList.negatives.push(
+          normalizeKeyword(negative.getText(), negative.getMatchType()));
+    }
+
+    const campaigns = negativeKeywordList.campaigns()
+        .withCondition('Status = ENABLED').get();
+
+    while (campaigns.hasNext()) {
+      const campaign = campaigns.next();
+      const campaignId = campaign.getId();
+
+      if (cache[campaignId]) {
+        cache[campaignId].negativesFromLists =
+            cache[campaignId].negativesFromLists.concat(negativeList);
+      }
+    }
+  }
+
+  Logger.log('Finding negative conflicts');
+  let conflicts = [];
+
+  const enrichConflict = function(
+      conflict, campaignId, adGroupId, level, opt_listName) {
+    conflict.campaignId = campaignId;
+    conflict.adGroupId = adGroupId;
+    conflict.campaignName = cache[campaignId].campaignName;
+    conflict.adGroupName = cache[campaignId].adGroups[adGroupId].adGroupName;
+    conflict.level = level;
+    conflict.listName = opt_listName || '-';
+  };
+
+  for (const campaignId in cache) {
+    for (const adGroupId in cache[campaignId].adGroups) {
+      const positives = cache[campaignId].adGroups[adGroupId].positives;
+
+      const negativeLevels = {
+        'Campaign': cache[campaignId].negatives,
+        'Ad Group': cache[campaignId].adGroups[adGroupId].negatives
+      };
+
+      for (const level in negativeLevels) {
+        const newConflicts = checkForConflicts(negativeLevels[level], positives);
+
+        for (const newConflict of newConflicts) {
+          enrichConflict(newConflict, campaignId, adGroupId, level);
+        }
+        conflicts = conflicts.concat(newConflicts);
+      }
+
+      const negativeLists = cache[campaignId].negativesFromLists;
+      const level = 'Negative list';
+      for (const negativeList of negativeLists) {
+        const newConflicts = checkForConflicts(
+            negativeList.negatives, positives);
+
+        for (const newConflict of newConflicts) {
+          enrichConflict(
+              newConflict, campaignId, adGroupId, level, negativeList.name);
+        }
+        conflicts = conflicts.concat(newConflicts);
+      }
+    }
+  }
+
+  return conflicts;
+}
+
+function saveConflictsToSpreadsheet(conflicts, reportUrl, customerId) {
+  const reportSheet = SpreadsheetApp.openByUrl(reportUrl).getActiveSheet();
+  reportSheet.clear();
+  reportSheet.appendRow([
+    "Account",
+    "Negative Keyword",
+    "Level",
+    "Blocked keywords",
+    "Campaign",
+    "Ad Group",
+    "Negative list name"
+  ]);
+
+  conflicts.forEach(conflict => {
+    reportSheet.appendRow([
+      customerId,
+      conflict.positive,
+      conflict.level,
+      conflict.negative,
+      conflict.campaignName,
+      conflict.adGroupName,
+      conflict.listName
+    ]);
+  });
+}
+
+function sendEmail(conflicts, accountId, emailAddresses, reportUrl) {
+  const subject = `Negative Keyword Conflicts Found - Account ${accountId}`;
+  const body = `Negative keyword conflicts were found in your Google Ads account ${accountId}. ` +
+               `See ${reportUrl} for details. You may wish to review these conflicts and make necessary adjustments.`;
+  MailApp.sendEmail(emailAddresses, subject, body);
+}
+
+// Helper functions
+
+function normalizeKeyword(keywordText, matchType) {
+  keywordText = keywordText.trim().toLowerCase();  // Verwijder overbodige spaties en zet om naar kleine letters
+
+  switch (matchType) {
+    case 'EXACT':
+      return `[${keywordText}]`;
+    case 'PHRASE':
+      return `"${keywordText}"`;
+    case 'BROAD':
+    default:
+      return keywordText;
+  }
+}
+
+function checkForConflicts(negatives, positives) {
+  const conflicts = [];
+  positives.forEach(positive => {
+    negatives.forEach(negative => {
+      if (positive !== negative && (negative.includes(positive) || positive.includes(negative))) {
+        conflicts.push({ positive, negative });
+      }
+    });
+  });
+  return conflicts;
+}
+
+function getCampaignIds(campaigns) {
+  const campaignIds = [];
+  while (campaigns.hasNext()) {
+    campaignIds.push(campaigns.next().getId());
+  }
+  return campaignIds;
+}
+
+function getAllCampaignIds() {
+  return getCampaignIds(AdsApp.campaigns().get());
+}
+
+function getCampaignIdsWithLabel(labelText) {
+  const labels = AdsApp.labels().withCondition(`Name = "${labelText}"`).get();
+  if (!labels.hasNext()) {
+    return [];
+  }
+  const label = labels.next();
+  return getCampaignIds(label.campaigns().get());
+}
