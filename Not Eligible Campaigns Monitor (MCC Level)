@@ -1,0 +1,141 @@
+/*
+Google Ads Script: Not Eligible Campaigns Monitor (MCC Level)
+Versie: 1.0
+
+Doel:
+Dit script identificeert en rapporteert actieve campagnes in Google Ads accounts die de status 
+"Not eligible - All ads disapproved" hebben, maar toch impressies hebben gehad in de afgelopen 7 dagen.
+
+Dit script zal:
+1. Alle accounts in uw MCC doorlopen die in de afgelopen 7 dagen impressies hebben gehad.
+2. Voor elk account, alle actieve campagnes controleren die impressies hebben gehad in de afgelopen 7 dagen.
+3. Voor elke campagne, alle actieve advertenties controleren op hun goedkeuringsstatus.
+4. Campagnes identificeren waarvan alle advertenties zijn afgekeurd, maar die toch impressies hebben gehad.
+5. Een e-mailrapport genereren met een overzicht van de geïdentificeerde problematische campagnes.
+6. Het e-mailrapport verzenden naar het opgegeven e-mailadres.
+
+Belangrijke functies:
+- main(): De hoofdfunctie die het hele proces orchestreert.
+- sendEmail(problemAccounts): Genereert en verzendt het e-mailrapport.
+
+Opmerkingen:
+- Het script is geoptimaliseerd voor efficiëntie en zou binnen een redelijke tijd moeten uitvoeren.
+- Als het script te lang duurt om uit te voeren, overweeg dan om het op te splitsen in meerdere scripts 
+  die elk een deel van de accounts behandelen.
+- Zorg ervoor dat u de juiste machtigingen heeft ingesteld voor e-mailverzending vanuit uw Google Ads account.
+
+Foutafhandeling:
+- Het script zal doorgaan met de uitvoering als er problemen zijn met individuele accounts of campagnes.
+- Ernstige fouten worden gelogd en kunnen worden bekeken in het scriptlogboek na uitvoering.
+
+Aanpassingen:
+- U kunt aanvullende filters toevoegen in de main() functie om specifieke accounts of campagnes te targeten.
+- De e-mailindeling kan worden aangepast in de sendEmail() functie om aan uw rapportagebehoeften te voldoen.
+
+*/
+
+var CONFIG = {
+  EMAILS: [
+    "robert.creutzburg@skydreams.nl",
+    "jeroen.snoek@skydreams.nl",
+    "theo.vanbeusichem@skydreams.nl"
+  ],
+  DATE_RANGE: "LAST_7_DAYS",
+  IMPRESSION_THRESHOLD: 1
+};
+
+function main() {
+  var problemAccounts = [];
+  var accountIterator = AdsManagerApp.accounts().get();
+  var totalAccounts = accountIterator.totalNumEntities();
+  
+  Logger.log("Totaal aantal te verwerken accounts: " + totalAccounts);
+
+  var processedAccounts = 0;
+  while (accountIterator.hasNext()) {
+    var account = accountIterator.next();
+    try {
+      var accountInfo = processAccount(account);
+      if (accountInfo) {
+        problemAccounts.push(accountInfo);
+      }
+    } catch (e) {
+      Logger.log("Fout bij verwerken van account " + account.getName() + ": " + e.message);
+    }
+    
+    processedAccounts++;
+    if (processedAccounts % 10 === 0) {
+      Logger.log("Voortgang: " + processedAccounts + "/" + totalAccounts + " accounts verwerkt");
+    }
+  }
+
+  if (problemAccounts.length > 0) {
+    sendEmail(problemAccounts);
+  } else {
+    Logger.log("Geen problematische campagnes gevonden.");
+  }
+}
+
+function processAccount(account) {
+  AdsManagerApp.select(account);
+  
+  var accountInfo = {
+    name: account.getName(),
+    customerId: account.getCustomerId(),
+    campaigns: []
+  };
+
+  var campaignIterator = AdsApp.campaigns()
+    .withCondition("Status = ENABLED")
+    .withCondition("AdvertisingChannelType = SEARCH")
+    .withCondition("Impressions > " + CONFIG.IMPRESSION_THRESHOLD)
+    .forDateRange(CONFIG.DATE_RANGE)
+    .get();
+  
+  while (campaignIterator.hasNext()) {
+    var campaign = campaignIterator.next();
+    if (allAdsDisapproved(campaign)) {
+      var stats = campaign.getStatsFor(CONFIG.DATE_RANGE);
+      accountInfo.campaigns.push({
+        name: campaign.getName(),
+        id: campaign.getId(),
+        impressions: stats.getImpressions()
+      });
+    }
+  }
+  
+  return accountInfo.campaigns.length > 0 ? accountInfo : null;
+}
+
+function allAdsDisapproved(campaign) {
+  var adIterator = AdsApp.ads()
+    .withCondition("CampaignId = " + campaign.getId())
+    .withCondition("Status = ENABLED")
+    .get();
+  
+  while (adIterator.hasNext()) {
+    if (adIterator.next().getPolicyApprovalStatus() !== "DISAPPROVED") {
+      return false;
+    }
+  }
+  
+  return adIterator.totalNumEntities() > 0;
+}
+
+function sendEmail(problemAccounts) {
+  var subject = "Waarschuwing: Not Eligible search campagnes met recente impressies gevonden";
+  var body = "De volgende accounts hebben actieve search campagnes met de status 'Not eligible - All ads disapproved' die toch impressies hebben gehad in de afgelopen " + CONFIG.DATE_RANGE + ":\n\n";
+  
+  problemAccounts.forEach(function(account) {
+    body += "Account: " + account.name + " (ID: " + account.customerId + ")\n";
+    body += "Problematische campagnes:\n";
+    account.campaigns.forEach(function(campaign) {
+      body += "- " + campaign.name + " (ID: " + campaign.id + ")\n";
+      body += "  Impressies: " + campaign.impressions + "\n";
+    });
+    body += "\n";
+  });
+  
+  MailApp.sendEmail(CONFIG.EMAILS.join(','), subject, body);
+  Logger.log("E-mail verzonden naar: " + CONFIG.EMAILS.join(', '));
+}
