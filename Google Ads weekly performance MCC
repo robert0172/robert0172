@@ -1,0 +1,215 @@
+/**
+ * Corrected MCC Level Weekly Comparison Google Ads Script
+ * 
+ * This script generates a report comparing the performance of all enabled campaigns
+ * across all accessible accounts in the MCC for last week versus the week before that.
+ * It implements proper MCC-level operations, correct GAQL queries, and robust error handling.
+ * 
+ * Version: 16.0
+ * Created: 2024-08-21
+ * Updated: 2024-08-21
+ */
+
+var CONFIG = {
+  EMAIL_RECIPIENT: "robert.creutzburg@skydreams.nl",
+  MAX_RETRIES: 3,
+  RETRY_INTERVAL: 30000, // 30 seconds
+  CURRENCY_SYMBOL: "€"
+};
+
+function main() {
+  Logger.log("Script started");
+  var accountIterator = AdsManagerApp.accounts().get();
+  var processedAccounts = 0;
+  var failedAccounts = 0;
+  var errorLog = [];
+
+  while (accountIterator.hasNext()) {
+    var account = accountIterator.next();
+    var accountId = account.getCustomerId();
+    Logger.log("Attempting to process account: " + accountId);
+
+    try {
+      var result = processAccountSafely(account);
+      if (result.success) {
+        processedAccounts++;
+        Logger.log("Successfully processed account: " + accountId);
+      } else {
+        failedAccounts++;
+        errorLog.push("Failed to process account " + accountId + ": " + result.error);
+        Logger.log("Failed to process account " + accountId + ": " + result.error);
+      }
+    } catch (e) {
+      failedAccounts++;
+      errorLog.push("Unexpected error processing account " + accountId + ": " + e.message);
+      Logger.log("Unexpected error processing account " + accountId + ": " + e.message);
+    }
+  }
+
+  sendSummaryEmail(processedAccounts, failedAccounts, errorLog);
+  Logger.log("Script completed");
+}
+
+function processAccountSafely(account) {
+  for (var attempt = 0; attempt < CONFIG.MAX_RETRIES; attempt++) {
+    try {
+      AdsManagerApp.select(account);
+      
+      var accountName = account.getName();
+      var customerId = account.getCustomerId();
+      Logger.log("Processing account: " + customerId);
+
+      var reportData = getReportData();
+      
+      if (reportData.thisWeek.length > 0 || reportData.lastWeek.length > 0) {
+        var emailBody = createEmailBody(reportData, accountName, customerId);
+        sendEmail(emailBody, customerId);
+        return { success: true };
+      } else {
+        Logger.log("No data found for account: " + customerId);
+        return { success: true };
+      }
+    } catch (e) {
+      Logger.log("Attempt " + (attempt + 1) + " failed for account " + account.getCustomerId() + ": " + e.message);
+      if (attempt < CONFIG.MAX_RETRIES - 1) {
+        Utilities.sleep(CONFIG.RETRY_INTERVAL);
+      } else {
+        return { success: false, error: e.message };
+      }
+    }
+  }
+}
+
+function getReportData() {
+  var thisWeekQuery = buildGAQLQuery('LAST_7_DAYS');
+
+  var today = new Date();
+  var endDate = new Date(today);
+  endDate.setDate(today.getDate() - 8); // End of previous week
+  var startDate = new Date(today);
+  startDate.setDate(today.getDate() - 14); // Start of previous week
+
+  var lastWeekQuery = buildGAQLQuery(formatDate(startDate), formatDate(endDate));
+
+  var thisWeekData = runGAQLQuery(thisWeekQuery);
+  var lastWeekData = runGAQLQuery(lastWeekQuery);
+
+  return {
+    thisWeek: thisWeekData,
+    lastWeek: lastWeekData
+  };
+}
+
+function buildGAQLQuery(startDate, endDate) {
+  var dateClause = endDate ? 
+    `segments.date BETWEEN '${startDate}' AND '${endDate}'` :
+    `segments.date DURING ${startDate}`;
+  
+  return `
+    SELECT 
+      campaign.name, 
+      metrics.impressions, 
+      metrics.clicks, 
+      metrics.cost_micros, 
+      metrics.conversions, 
+      metrics.conversions_value 
+    FROM campaign 
+    WHERE 
+      campaign.status = 'ENABLED' AND 
+      ${dateClause}
+  `;
+}
+
+function formatDate(date) {
+  var year = date.getFullYear();
+  var month = String(date.getMonth() + 1).padStart(2, '0');
+  var day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function runGAQLQuery(query) {
+  Logger.log("Executing GAQL query: " + query);
+  var report = AdsApp.search(query);
+  var results = [];
+
+  while (report.hasNext()) {
+    var row = report.next();
+    results.push({
+      name: row.campaign.name,
+      impressions: row.metrics.impressions,
+      clicks: row.metrics.clicks,
+      cost: row.metrics.costMicros / 1000000,
+      conversions: row.metrics.conversions,
+      conversionValue: row.metrics.conversionsValue
+    });
+  }
+
+  Logger.log("Query returned " + results.length + " results");
+  return results;
+}
+
+function createEmailBody(reportData, accountName, customerId) {
+  var html = '<h1 style="color: #4A4A4A; text-align: center;">Weekly Campaign Comparison Report</h1>';
+  html += `<h2 style="color: #6D6D6D; text-align: center;">Account: ${accountName} (${customerId})</h2>`;
+  html += `<h3 style="color: #6D6D6D; text-align: center;">Last 7 Days vs Previous 7 Days</h3>`;
+
+  html += '<table border="1" cellpadding="10" style="border-collapse: collapse; margin: auto;">';
+  html += '<tr style="background-color: #f2f2f2; font-weight: bold;">' +
+    '<th>Campaign</th>' +
+    '<th>Impressions</th>' +
+    '<th>Clicks</th>' +
+    '<th>Cost</th>' +
+    '<th>Conversions</th>' +
+    '<th>Conv. Value</th>' +
+    '</tr>';
+
+  reportData.thisWeek.forEach(function(thisWeekCampaign) {
+    var lastWeekCampaign = reportData.lastWeek.find(c => c.name === thisWeekCampaign.name) || 
+      {impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionValue: 0};
+    
+    html += '<tr>';
+    html += '<td>' + thisWeekCampaign.name + '</td>' +
+      '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.impressions, lastWeekCampaign.impressions) + '</td>' +
+      '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.clicks, lastWeekCampaign.clicks) + '</td>' +
+      '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.cost, lastWeekCampaign.cost, true) + '</td>' +
+      '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.conversions, lastWeekCampaign.conversions) + '</td>' +
+      '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.conversionValue, lastWeekCampaign.conversionValue, true) + '</td>' +
+      '</tr>';
+  });
+
+  html += '</table>';
+
+  return html;
+}
+
+function formatComparison(current, previous, isCurrency) {
+  var diff = current - previous;
+  var percentChange = previous !== 0 ? (diff / previous) * 100 : 100;
+  var formattedCurrent = isCurrency ? CONFIG.CURRENCY_SYMBOL + current.toFixed(2) : current.toLocaleString();
+  var formattedDiff = isCurrency ? CONFIG.CURRENCY_SYMBOL + Math.abs(diff).toFixed(2) : Math.abs(diff).toLocaleString();
+  var arrow = diff >= 0 ? '▲' : '▼';
+  var color = diff >= 0 ? 'green' : 'red';
+
+  return formattedCurrent + ' <span style="color:' + color + ';">(' + arrow + formattedDiff + ', ' + percentChange.toFixed(2) + '%)</span>';
+}
+
+function sendEmail(emailBody, accountId) {
+  var subject = `Weekly Campaign Comparison Report - Account ${accountId}`;
+  
+  MailApp.sendEmail({
+    to: CONFIG.EMAIL_RECIPIENT,
+    subject: subject,
+    htmlBody: emailBody
+  });
+  Logger.log("Email sent for account: " + accountId);
+}
+
+function sendSummaryEmail(processedAccounts, failedAccounts, errorLog) {
+  var subject = "MCC Weekly Report Summary";
+  var body = `Processed accounts: ${processedAccounts}\n` +
+             `Failed accounts: ${failedAccounts}\n\n` +
+             `Error Log:\n${errorLog.join('\n')}`;
+  
+  MailApp.sendEmail(CONFIG.EMAIL_RECIPIENT, subject, body);
+  Logger.log("Summary email sent");
+}
