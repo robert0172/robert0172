@@ -1,11 +1,12 @@
 /**
- * Corrected MCC Level Weekly Comparison Google Ads Script
+ * MCC Level Weekly Comparison Google Ads Script
  * 
- * This script generates a report comparing the performance of all enabled campaigns
- * across all accessible accounts in the MCC for last week versus the week before that.
- * It implements proper MCC-level operations, correct GAQL queries, and robust error handling.
+ * This script generates a report comparing the performance of campaigns
+ * across all accessible accounts in the MCC for last week (Monday to Sunday)
+ * versus the week before that. It excludes specific campaigns and highlights
+ * top performers based on conversions.
  * 
- * Version: 16.0
+ * Version: 6.0
  * Created: 2024-08-21
  * Updated: 2024-08-21
  */
@@ -14,7 +15,10 @@ var CONFIG = {
   EMAIL_RECIPIENT: "robert.creutzburg@skydreams.nl",
   MAX_RETRIES: 3,
   RETRY_INTERVAL: 30000, // 30 seconds
-  CURRENCY_SYMBOL: "€"
+  CURRENCY_SYMBOL: "€",
+  PERFORMANCE_EMOJIS: ['🔥', '👍', '😐', '👎', '🆘'],
+  COLOR_PALETTE: ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FED766', '#2AB7CA'],
+  EXCLUDED_CAMPAIGN_KEYWORDS: ['moving', 'demena', 'umzug', 'trasloch', 'getamove', 'flytt', 'mudanza', 'verhuis', 'flyt']
 };
 
 function main() {
@@ -81,15 +85,9 @@ function processAccountSafely(account) {
 }
 
 function getReportData() {
-  var thisWeekQuery = buildGAQLQuery('LAST_7_DAYS');
-
-  var today = new Date();
-  var endDate = new Date(today);
-  endDate.setDate(today.getDate() - 8); // End of previous week
-  var startDate = new Date(today);
-  startDate.setDate(today.getDate() - 14); // Start of previous week
-
-  var lastWeekQuery = buildGAQLQuery(formatDate(startDate), formatDate(endDate));
+  var dates = getLastTwoWeekDates();
+  var thisWeekQuery = buildGAQLQuery(dates.thisWeekStart, dates.thisWeekEnd);
+  var lastWeekQuery = buildGAQLQuery(dates.lastWeekStart, dates.lastWeekEnd);
 
   var thisWeekData = runGAQLQuery(thisWeekQuery);
   var lastWeekData = runGAQLQuery(lastWeekQuery);
@@ -100,11 +98,36 @@ function getReportData() {
   };
 }
 
+function getLastTwoWeekDates() {
+  var today = new Date();
+  var currentDay = today.getDay();
+  var daysToLastSunday = currentDay === 0 ? 7 : currentDay;
+
+  var lastSunday = new Date(today);
+  lastSunday.setDate(today.getDate() - daysToLastSunday);
+
+  var thisWeekStart = new Date(lastSunday);
+  thisWeekStart.setDate(lastSunday.getDate() - 6);
+
+  var lastWeekEnd = new Date(thisWeekStart);
+  lastWeekEnd.setDate(thisWeekStart.getDate() - 1);
+
+  var lastWeekStart = new Date(lastWeekEnd);
+  lastWeekStart.setDate(lastWeekEnd.getDate() - 6);
+
+  return {
+    thisWeekStart: formatDate(thisWeekStart),
+    thisWeekEnd: formatDate(lastSunday),
+    lastWeekStart: formatDate(lastWeekStart),
+    lastWeekEnd: formatDate(lastWeekEnd)
+  };
+}
+
+function formatDate(date) {
+  return Utilities.formatDate(date, AdsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd');
+}
+
 function buildGAQLQuery(startDate, endDate) {
-  var dateClause = endDate ? 
-    `segments.date BETWEEN '${startDate}' AND '${endDate}'` :
-    `segments.date DURING ${startDate}`;
-  
   return `
     SELECT 
       campaign.name, 
@@ -116,15 +139,8 @@ function buildGAQLQuery(startDate, endDate) {
     FROM campaign 
     WHERE 
       campaign.status = 'ENABLED' AND 
-      ${dateClause}
+      segments.date BETWEEN '${startDate}' AND '${endDate}'
   `;
-}
-
-function formatDate(date) {
-  var year = date.getFullYear();
-  var month = String(date.getMonth() + 1).padStart(2, '0');
-  var day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
 }
 
 function runGAQLQuery(query) {
@@ -134,24 +150,35 @@ function runGAQLQuery(query) {
 
   while (report.hasNext()) {
     var row = report.next();
-    results.push({
-      name: row.campaign.name,
-      impressions: row.metrics.impressions,
-      clicks: row.metrics.clicks,
-      cost: row.metrics.costMicros / 1000000,
-      conversions: row.metrics.conversions,
-      conversionValue: row.metrics.conversionsValue
-    });
+    if (!isExcludedCampaign(row.campaign.name)) {
+      results.push({
+        name: row.campaign.name,
+        impressions: row.metrics.impressions,
+        clicks: row.metrics.clicks,
+        cost: row.metrics.costMicros / 1000000,
+        conversions: row.metrics.conversions,
+        conversionValue: row.metrics.conversionsValue
+      });
+    }
   }
 
   Logger.log("Query returned " + results.length + " results");
   return results;
 }
 
+function isExcludedCampaign(campaignName) {
+  return CONFIG.EXCLUDED_CAMPAIGN_KEYWORDS.some(keyword => 
+    campaignName.toLowerCase().includes(keyword.toLowerCase())
+  );
+}
+
 function createEmailBody(reportData, accountName, customerId) {
-  var html = '<h1 style="color: #4A4A4A; text-align: center;">Weekly Campaign Comparison Report</h1>';
+  var html = '<h1 style="color: #4A4A4A; text-align: center;">🎉 Weekly Campaign Comparison Report 🎉</h1>';
   html += `<h2 style="color: #6D6D6D; text-align: center;">Account: ${accountName} (${customerId})</h2>`;
-  html += `<h3 style="color: #6D6D6D; text-align: center;">Last 7 Days vs Previous 7 Days</h3>`;
+  html += `<h3 style="color: #6D6D6D; text-align: center;">Last Week vs Previous Week</h3>`;
+
+  // Add top campaigns section
+  html += createTopCampaignsSection(reportData.thisWeek);
 
   html += '<table border="1" cellpadding="10" style="border-collapse: collapse; margin: auto;">';
   html += '<tr style="background-color: #f2f2f2; font-weight: bold;">' +
@@ -161,24 +188,54 @@ function createEmailBody(reportData, accountName, customerId) {
     '<th>Cost</th>' +
     '<th>Conversions</th>' +
     '<th>Conv. Value</th>' +
+    '<th>Performance</th>' +
     '</tr>';
 
-  reportData.thisWeek.forEach(function(thisWeekCampaign) {
+  reportData.thisWeek.forEach(function(thisWeekCampaign, index) {
     var lastWeekCampaign = reportData.lastWeek.find(c => c.name === thisWeekCampaign.name) || 
       {impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionValue: 0};
     
-    html += '<tr>';
+    var rowColor = CONFIG.COLOR_PALETTE[index % CONFIG.COLOR_PALETTE.length];
+    var performanceEmoji = getPerformanceEmoji(thisWeekCampaign, lastWeekCampaign);
+    
+    html += '<tr style="background-color: ' + rowColor + '20;">'; // 20 is for 20% opacity
     html += '<td>' + thisWeekCampaign.name + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.impressions, lastWeekCampaign.impressions) + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.clicks, lastWeekCampaign.clicks) + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.cost, lastWeekCampaign.cost, true) + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.conversions, lastWeekCampaign.conversions) + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.conversionValue, lastWeekCampaign.conversionValue, true) + '</td>' +
+      '<td style="text-align: center; font-size: 24px;">' + performanceEmoji + '</td>' +
       '</tr>';
   });
 
   html += '</table>';
 
+  html += createEmojiLegend();
+
+  return html;
+}
+
+function createTopCampaignsSection(campaigns) {
+  var sortedCampaigns = campaigns.sort((a, b) => b.conversions - a.conversions);
+  var topCampaigns = sortedCampaigns.slice(0, 5);
+
+  var html = '<h3 style="color: #4A4A4A; text-align: center;">Top 5 Campaigns by Conversions</h3>';
+  html += '<table border="1" cellpadding="10" style="border-collapse: collapse; margin: auto; margin-bottom: 20px;">';
+  html += '<tr style="background-color: #f2f2f2; font-weight: bold;">' +
+    '<th>Campaign</th>' +
+    '<th>Conversions</th>' +
+    '</tr>';
+
+  topCampaigns.forEach(function(campaign, index) {
+    var rowColor = CONFIG.COLOR_PALETTE[index % CONFIG.COLOR_PALETTE.length];
+    html += '<tr style="background-color: ' + rowColor + '20;">';
+    html += '<td>' + campaign.name + '</td>' +
+      '<td style="text-align: right;">' + campaign.conversions.toFixed(2) + '</td>' +
+      '</tr>';
+  });
+
+  html += '</table>';
   return html;
 }
 
@@ -193,8 +250,29 @@ function formatComparison(current, previous, isCurrency) {
   return formattedCurrent + ' <span style="color:' + color + ';">(' + arrow + formattedDiff + ', ' + percentChange.toFixed(2) + '%)</span>';
 }
 
+function getPerformanceEmoji(current, previous) {
+  var metrics = ['impressions', 'clicks', 'conversions', 'conversionValue'];
+  var improvements = metrics.filter(metric => current[metric] > previous[metric]).length;
+  return CONFIG.PERFORMANCE_EMOJIS[Math.floor((improvements / metrics.length) * (CONFIG.PERFORMANCE_EMOJIS.length - 1))];
+}
+
+function createEmojiLegend() {
+  var html = '<div style="margin-top: 20px; border-top: 1px solid #ccc; padding-top: 10px;">';
+  html += '<h4 style="color: #4A4A4A; text-align: center;">Emoji Legend</h4>';
+  html += '<table style="margin: auto; border-collapse: collapse;">';
+  html += '<tr><th style="text-align: left; padding: 5px;">Emoji</th><th style="text-align: left; padding: 5px;">Meaning</th></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[4] + '</td><td>Excellent (All metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[3] + '</td><td>Good (Most metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[2] + '</td><td>Average (Some metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[1] + '</td><td>Below Average (Few metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[0] + '</td><td>Poor (No metrics improved)</td></tr>';
+  html += '</table>';
+  html += '</div>';
+  return html;
+}
+
 function sendEmail(emailBody, accountId) {
-  var subject = `Weekly Campaign Comparison Report - Account ${accountId}`;
+  var subject = `🏠 Weekly Campaign Comparison Report - Account ${accountId}`;
   
   MailApp.sendEmail({
     to: CONFIG.EMAIL_RECIPIENT,
