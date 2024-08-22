@@ -253,7 +253,12 @@ function formatComparison(current, previous, isCurrency) {
 function getPerformanceEmoji(current, previous) {
   var metrics = ['impressions', 'clicks', 'conversions', 'conversionValue'];
   var improvements = metrics.filter(metric => current[metric] > previous[metric]).length;
-  return CONFIG.PERFORMANCE_EMOJIS[Math.floor((improvements / metrics.length) * (CONFIG.PERFORMANCE_EMOJIS.length - 1))];
+  
+  if (improvements === 4) return CONFIG.PERFORMANCE_EMOJIS[0]; // 🔥 Excellent
+  if (improvements === 3) return CONFIG.PERFORMANCE_EMOJIS[1]; // 👍 Good
+  if (improvements === 2) return CONFIG.PERFORMANCE_EMOJIS[2]; // 😐 Average
+  if (improvements === 1) return CONFIG.PERFORMANCE_EMOJIS[3]; // 👎 Below Average
+  return CONFIG.PERFORMANCE_EMOJIS[4]; // 🆘 Poor
 }
 
 function createEmojiLegend() {
