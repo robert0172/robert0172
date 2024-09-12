@@ -1,0 +1,85 @@
+function main() {
+  var campaignName = "Search - branded - Skydreams";
+  var targetSIS = 0.85;
+  var bidAdjustment = 0.01;
+  var emailAddress = "robert.creutzburg@skydreams.nl";
+
+  var campaign = AdsApp.campaigns()
+    .withCondition("Name = '" + campaignName + "'")
+    .get()
+    .next();
+
+  if (!campaign) {
+    Logger.log("Campaign not found: " + campaignName);
+    return;
+  }
+
+  var report = AdsApp.report(
+    "SELECT Criteria, SearchImpressionShare, CpcBid " +
+    "FROM KEYWORDS_PERFORMANCE_REPORT " +
+    "WHERE CampaignName = '" + campaignName + "' " +
+    "DURING YESTERDAY"
+  );
+
+  var rows = report.rows();
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var keyword = row['Criteria'];
+    var searchImpressionShare = parseFloat(row['SearchImpressionShare']) / 100;
+    var currentBid = parseFloat(row['CpcBid']);
+
+    if (searchImpressionShare < targetSIS) {
+      var newBid = currentBid + bidAdjustment;
+      adjustBid(keyword, currentBid, newBid, "Increased", searchImpressionShare, targetSIS);
+    } else if (searchImpressionShare > targetSIS) {
+      var newBid = currentBid - bidAdjustment;
+      adjustBid(keyword, currentBid, newBid, "Decreased", searchImpressionShare, targetSIS);
+    } else {
+      Logger.log("No change for keyword: " + keyword + " (Current SIS: " + (searchImpressionShare * 100).toFixed(2) + "% matches target SIS: " + (targetSIS * 100).toFixed(2) + "%)");
+    }
+  }
+
+  checkSearchTopImpressionShare(campaign, emailAddress);
+}
+
+function adjustBid(keyword, oldBid, newBid, action, currentSIS, targetSIS) {
+  var keywordIterator = AdsApp.keywords()
+    .withCondition("KeywordText = '" + keyword + "'")
+    .get();
+  
+  if (keywordIterator.hasNext()) {
+    var keywordEntity = keywordIterator.next();
+    keywordEntity.bidding().setCpc(newBid);
+    
+    var change = Math.abs(newBid - oldBid).toFixed(2);
+    Logger.log(action + " bid for keyword: " + keyword + " by €" + change + 
+               " (Old bid: €" + oldBid.toFixed(2) + ", New bid: €" + newBid.toFixed(2) + "). " +
+               "Reason: Current SIS is " + (currentSIS * 100).toFixed(2) + "%, " +
+               (action === "Increased" ? "below" : "above") + " target SIS of " + (targetSIS * 100).toFixed(2) + "%.");
+  }
+}
+
+function checkSearchTopImpressionShare(campaign, emailAddress) {
+  var report = AdsApp.report(
+    "SELECT CampaignName, SearchTopImpressionShare " +
+    "FROM CAMPAIGN_PERFORMANCE_REPORT " +
+    "WHERE CampaignName = '" + campaign.getName() + "' " +
+    "DURING YESTERDAY"
+  );
+
+  var rows = report.rows();
+  if (rows.hasNext()) {
+    var row = rows.next();
+    var searchTopImpressionShare = parseFloat(row['SearchTopImpressionShare']) / 100;
+
+    if (searchTopImpressionShare < 0.5) {
+      var subject = "Campaign Performance Alert - Low Search Top Impression Share";
+      var body = "The campaign '" + campaign.getName() + "' had a Search Top Impression Share of " + 
+                 (searchTopImpressionShare * 100).toFixed(2) + "% yesterday. " +
+                 "This might indicate that competitors are outbidding us.";
+      
+      MailApp.sendEmail(emailAddress, subject, body);
+      Logger.log("Email sent to " + emailAddress + " about low Search Top Impression Share.");
+    }
+  }
+}
