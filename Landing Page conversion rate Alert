@@ -1,144 +1,109 @@
-/*
-Google Ads Script: Landing Page Conversion Rate Monitor
- 
-Instructions:
-1. Copy this entire script and paste it into your Google Ads script editor.
-2. Replace 'your-email@example.com' with the email address where you want to receive alerts.
-3. (Optional) Adjust the CONVERSION_RATE_THRESHOLD value if you want to change the sensitivity of the alerts.
-4. (Optional) Modify the DATE_RANGE_DAYS value if you want to analyze a different time period.
-5. Save the script.
-6. Run the script manually to test it, or set up a schedule for automated running.
- 
-This script will:
-- Compare landing page performance over two consecutive periods (default: 14 days each).
-- Send an email alert if any landing page's conversion rate changes significantly.
-- Include click data for context in the email alert.
-- Add the account name to the email subject for easy identification.
- 
-Note: Make sure you have the necessary permissions to create and run scripts in your Google Ads account.
-*/
- 
 function main() {
-  var CONVERSION_RATE_THRESHOLD = 0.3; // 30% change
-  var EMAIL_ADDRESS = 'your-email@example.com'; // Replace with your email address
-  var DATE_RANGE_DAYS = 14; // Number of days for each analysis period
- 
-  var account = AdsApp.currentAccount();
-  var accountName = account.getName();
- 
-  var today = new Date();
-  var periodEndDate = new Date(today.getTime() - DATE_RANGE_DAYS * 24 * 60 * 60 * 1000);
-  var periodStartDate = new Date(periodEndDate.getTime() - DATE_RANGE_DAYS * 24 * 60 * 60 * 1000);
- 
-  var DATE_RANGE = formatDate(periodEndDate) + " AND " + formatDate(today);
-  var PREVIOUS_DATE_RANGE = formatDate(periodStartDate) + " AND " + formatDate(periodEndDate);
- 
+  var campaignName = "Search - branded - Skydreams";
+  var targetSIS = 0.85;
+  var bidAdjustment = 0.01;
+  var emailAddress = "robert.creutzburg@skydreams.nl";
+  var lookbackDays = 14;
+  var clickThreshold = 10;
+  var clickThresholdDays = 30;
+  var maxBid = 1.00; // Maximum bid set to €1
+
+  var campaign = AdsApp.campaigns()
+    .withCondition("Name = '" + campaignName + "'")
+    .get()
+    .next();
+
+  if (!campaign) {
+    Logger.log("Campaign not found: " + campaignName);
+    return;
+  }
+
+  var dateRange = getDateRange(lookbackDays);
+  var clickThresholdDateRange = getDateRange(clickThresholdDays);
+
   var report = AdsApp.report(
-    "SELECT campaign.name, ad_group.name, ad_group_ad.ad.final_urls, " +
-    "metrics.conversions, metrics.clicks " +
-    "FROM ad_group_ad " +
-    "WHERE segments.date BETWEEN " + DATE_RANGE
+    "SELECT Criteria, SearchImpressionShare, AverageCpc, Clicks " +
+    "FROM KEYWORDS_PERFORMANCE_REPORT " +
+    "WHERE CampaignName = '" + campaignName + "' " +
+    "AND Status = ENABLED " +
+    "AND Clicks > " + clickThreshold + " " +
+    "DURING " + clickThresholdDateRange
   );
- 
+
+  var adjustments = [];
+
   var rows = report.rows();
-  var landingPageData = {};
- 
   while (rows.hasNext()) {
     var row = rows.next();
-    var urls = parseUrls(row['ad_group_ad.ad.final_urls']);
-    var conversions = parseFloat(row['metrics.conversions']);
-    var clicks = parseFloat(row['metrics.clicks']);
- 
-    urls.forEach(function(url) {
-      if (!landingPageData[url]) {
-        landingPageData[url] = { conversions: 0, clicks: 0 };
-      }
-      landingPageData[url].conversions += conversions;
-      landingPageData[url].clicks += clicks;
-    });
-  }
- 
-  var previousReport = AdsApp.report(
-    "SELECT ad_group_ad.ad.final_urls, " +
-    "metrics.conversions, metrics.clicks " +
-    "FROM ad_group_ad " +
-    "WHERE segments.date BETWEEN " + PREVIOUS_DATE_RANGE
-  );
- 
-  var previousRows = previousReport.rows();
-  var previousLandingPageData = {};
- 
-  while (previousRows.hasNext()) {
-    var row = previousRows.next();
-    var urls = parseUrls(row['ad_group_ad.ad.final_urls']);
-    var conversions = parseFloat(row['metrics.conversions']);
-    var clicks = parseFloat(row['metrics.clicks']);
- 
-    urls.forEach(function(url) {
-      if (!previousLandingPageData[url]) {
-        previousLandingPageData[url] = { conversions: 0, clicks: 0 };
-      }
-      previousLandingPageData[url].conversions += conversions;
-      previousLandingPageData[url].clicks += clicks;
-    });
-  }
- 
-  var alertMessages = [];
- 
-  for (var url in landingPageData) {
-    var currentData = landingPageData[url];
-    var previousData = previousLandingPageData[url] || { conversions: 0, clicks: 0 };
- 
-    var currentConvRate = currentData.clicks > 0 ? currentData.conversions / currentData.clicks : 0;
-    var previousConvRate = previousData.clicks > 0 ? previousData.conversions / previousData.clicks : 0;
- 
-    if (previousConvRate > 0) {
-      var convRateChange = Math.abs(currentConvRate - previousConvRate) / previousConvRate;
- 
-      if (convRateChange > CONVERSION_RATE_THRESHOLD) {
-        var changeDirection = currentConvRate > previousConvRate ? 'increased' : 'decreased';
-        var message = "Landing page: " + url + "\n" +
-                      "Conversion rate " + changeDirection + " by " + (convRateChange * 100).toFixed(2) + "%\n" +
-                      "Current conversion rate: " + (currentConvRate * 100).toFixed(2) + "%\n" +
-                      "Previous conversion rate: " + (previousConvRate * 100).toFixed(2) + "%\n" +
-                      "Current period clicks: " + currentData.clicks + "\n" +
-                      "Previous period clicks: " + previousData.clicks + "\n\n";
-        alertMessages.push(message);
-      }
+    var keyword = row['Criteria'];
+    var searchImpressionShare = parseFloat(row['SearchImpressionShare']) / 100;
+    var currentBid = parseFloat(row['AverageCpc']);
+    var clicks = parseInt(row['Clicks']);
+
+    Logger.log("Analyzing keyword: " + keyword + " (Clicks in last 30 days: " + clicks + ")");
+
+    if (searchImpressionShare < targetSIS && currentBid < maxBid) {
+      var newBid = Math.min(currentBid + bidAdjustment, maxBid);
+      adjustments.push(adjustBid(keyword, currentBid, newBid, "Increased", searchImpressionShare, targetSIS, lookbackDays));
+    } else if (searchImpressionShare > targetSIS) {
+      var newBid = currentBid - bidAdjustment;
+      adjustments.push(adjustBid(keyword, currentBid, newBid, "Decreased", searchImpressionShare, targetSIS, lookbackDays));
+    } else {
+      Logger.log("No change for keyword: " + keyword + " (" + lookbackDays + "-day avg SIS: " + 
+                 (searchImpressionShare * 100).toFixed(2) + "% matches target SIS: " + (targetSIS * 100).toFixed(2) + "%)");
     }
   }
- 
-  if (alertMessages.length > 0) {
-    var emailBody = "Comparison of landing page performance:\n" +
-                    "Current period: Last " + DATE_RANGE_DAYS + " days\n" +
-                    "Previous period: " + DATE_RANGE_DAYS + " days prior to the current period\n\n" +
-                    "The following landing pages have experienced significant changes in conversion rates:\n\n" +
-                    alertMessages.join("");
-    var emailSubject = "Landing Page Conversion Rate Alert - " + accountName;
-    MailApp.sendEmail(EMAIL_ADDRESS, emailSubject, emailBody);
+
+  // Send weekly email report on Monday
+  if (new Date().getDay() === 1) {
+    sendWeeklyReport(emailAddress, adjustments);
   }
 }
- 
-function parseUrls(urlData) {
-  if (typeof urlData === 'string') {
-    try {
-      var parsed = JSON.parse(urlData);
-      return Array.isArray(parsed) ? parsed : [parsed];
-    } catch (e) {
-      return urlData.split(',').map(function(url) { return url.trim(); });
-    }
-  } else if (Array.isArray(urlData)) {
-    return urlData;
-  } else if (typeof urlData === 'object') {
-    return Object.values(urlData);
-  } else {
-    return [];
-  }
+
+function getDateRange(daysAgo) {
+  var endDate = new Date();
+  var startDate = new Date(endDate.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+  
+  return formatDate(startDate) + "," + formatDate(endDate);
 }
- 
+
 function formatDate(date) {
   var year = date.getFullYear();
-  var month = ('0' + (date.getMonth() + 1)).slice(-2);
-  var day = ('0' + date.getDate()).slice(-2);
+  var month = (date.getMonth() + 1).toString().padStart(2, '0');
+  var day = date.getDate().toString().padStart(2, '0');
   return year + month + day;
+}
+
+function adjustBid(keyword, oldBid, newBid, action, currentSIS, targetSIS, lookbackDays) {
+  var keywordIterator = AdsApp.keywords()
+    .withCondition("KeywordText = '" + keyword + "'")
+    .get();
+  
+  if (keywordIterator.hasNext()) {
+    var keywordEntity = keywordIterator.next();
+    keywordEntity.bidding().setCpc(newBid);
+    
+    var change = Math.abs(newBid - oldBid).toFixed(2);
+    var logMessage = action + " bid for keyword: " + keyword + " by €" + change + 
+               " (Old bid: €" + oldBid.toFixed(2) + ", New bid: €" + newBid.toFixed(2) + "). " +
+               "Reason: " + lookbackDays + "-day avg SIS is " + (currentSIS * 100).toFixed(2) + "%, " +
+               (action === "Increased" ? "below" : "above") + " target SIS of " + (targetSIS * 100).toFixed(2) + "%.";
+    Logger.log(logMessage);
+    return logMessage;
+  }
+  return null;
+}
+
+function sendWeeklyReport(emailAddress, adjustments) {
+  var subject = "Weekly Bid Adjustment Report for Search - branded - Skydreams";
+  var body = "Here are the bid adjustments made in the past week:\n\n";
+  
+  body += adjustments.filter(adj => adj !== null).join("\n\n");
+  
+  if (adjustments.length === 0) {
+    body += "No bid adjustments were made this week.";
+  }
+
+  MailApp.sendEmail(emailAddress, subject, body);
+  Logger.log("Weekly report email sent to " + emailAddress);
 }
