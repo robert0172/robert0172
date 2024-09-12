@@ -1,3 +1,23 @@
+/*
+Google Ads Script: Search Impression Share (SIS) Based Bid Adjuster for Branded Campaign
+
+Instructions:
+1. Copy this entire script and paste it into your Google Ads script editor.
+2. Replace 'robert.creutzburg@skydreams.nl' with the email address where you want to receive weekly reports.
+3. (Optional) Adjust the targetSIS value if you want to change the target Search Impression Share.
+4. (Optional) Modify the lookbackDays, clickThreshold, or clickThresholdDays values to adjust the analysis parameters.
+5. Save the script.
+6. Run the script manually to test it, or set up a daily schedule for automated running.
+
+This script will:
+- Analyze enabled keywords in the "Search - branded - Skydreams" campaign that have more than 10 clicks in the last 30 days.
+- Adjust bids daily based on the 14-day average Search Impression Share, aiming for a target of 85%.
+- Increase or decrease bids by €0.01, with a maximum bid of €1.00.
+- Send a weekly email report every Monday with all bid adjustments made in the past week.
+
+Note: This script is designed to run daily, but will only send the email report on Mondays.
+*/
+
 function main() {
   var campaignName = "Search - branded - Skydreams";
   var targetSIS = 0.85;
