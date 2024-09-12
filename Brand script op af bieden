@@ -3,6 +3,9 @@ function main() {
   var targetSIS = 0.85;
   var bidAdjustment = 0.01;
   var emailAddress = "robert.creutzburg@skydreams.nl";
+  var lookbackDays = 14;
+  var clickThreshold = 10;
+  var clickThresholdDays = 30;
 
   var campaign = AdsApp.campaigns()
     .withCondition("Name = '" + campaignName + "'")
@@ -14,11 +17,16 @@ function main() {
     return;
   }
 
+  var dateRange = getDateRange(lookbackDays);
+  var clickThresholdDateRange = getDateRange(clickThresholdDays);
+
   var report = AdsApp.report(
-    "SELECT Criteria, SearchImpressionShare, CpcBid " +
+    "SELECT Criteria, SearchImpressionShare, AverageCpc, Clicks " +
     "FROM KEYWORDS_PERFORMANCE_REPORT " +
     "WHERE CampaignName = '" + campaignName + "' " +
-    "DURING YESTERDAY"
+    "AND Status = ENABLED " +
+    "AND Clicks > " + clickThreshold + " " +
+    "DURING " + clickThresholdDateRange
   );
 
   var rows = report.rows();
@@ -26,23 +34,41 @@ function main() {
     var row = rows.next();
     var keyword = row['Criteria'];
     var searchImpressionShare = parseFloat(row['SearchImpressionShare']) / 100;
-    var currentBid = parseFloat(row['CpcBid']);
+    var currentBid = parseFloat(row['AverageCpc']);
+    var clicks = parseInt(row['Clicks']);
+
+    Logger.log("Analyzing keyword: " + keyword + " (Clicks in last 30 days: " + clicks + ")");
 
     if (searchImpressionShare < targetSIS) {
       var newBid = currentBid + bidAdjustment;
-      adjustBid(keyword, currentBid, newBid, "Increased", searchImpressionShare, targetSIS);
+      adjustBid(keyword, currentBid, newBid, "Increased", searchImpressionShare, targetSIS, lookbackDays);
     } else if (searchImpressionShare > targetSIS) {
       var newBid = currentBid - bidAdjustment;
-      adjustBid(keyword, currentBid, newBid, "Decreased", searchImpressionShare, targetSIS);
+      adjustBid(keyword, currentBid, newBid, "Decreased", searchImpressionShare, targetSIS, lookbackDays);
     } else {
-      Logger.log("No change for keyword: " + keyword + " (Current SIS: " + (searchImpressionShare * 100).toFixed(2) + "% matches target SIS: " + (targetSIS * 100).toFixed(2) + "%)");
+      Logger.log("No change for keyword: " + keyword + " (" + lookbackDays + "-day avg SIS: " + 
+                 (searchImpressionShare * 100).toFixed(2) + "% matches target SIS: " + (targetSIS * 100).toFixed(2) + "%)");
     }
   }
 
-  checkSearchTopImpressionShare(campaign, emailAddress);
+  checkSearchTopImpressionShare(campaign, emailAddress, dateRange, lookbackDays);
 }
 
-function adjustBid(keyword, oldBid, newBid, action, currentSIS, targetSIS) {
+function getDateRange(daysAgo) {
+  var endDate = new Date();
+  var startDate = new Date(endDate.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+  
+  return formatDate(startDate) + "," + formatDate(endDate);
+}
+
+function formatDate(date) {
+  var year = date.getFullYear();
+  var month = (date.getMonth() + 1).toString().padStart(2, '0');
+  var day = date.getDate().toString().padStart(2, '0');
+  return year + month + day;
+}
+
+function adjustBid(keyword, oldBid, newBid, action, currentSIS, targetSIS, lookbackDays) {
   var keywordIterator = AdsApp.keywords()
     .withCondition("KeywordText = '" + keyword + "'")
     .get();
@@ -54,17 +80,17 @@ function adjustBid(keyword, oldBid, newBid, action, currentSIS, targetSIS) {
     var change = Math.abs(newBid - oldBid).toFixed(2);
     Logger.log(action + " bid for keyword: " + keyword + " by €" + change + 
                " (Old bid: €" + oldBid.toFixed(2) + ", New bid: €" + newBid.toFixed(2) + "). " +
-               "Reason: Current SIS is " + (currentSIS * 100).toFixed(2) + "%, " +
+               "Reason: " + lookbackDays + "-day avg SIS is " + (currentSIS * 100).toFixed(2) + "%, " +
                (action === "Increased" ? "below" : "above") + " target SIS of " + (targetSIS * 100).toFixed(2) + "%.");
   }
 }
 
-function checkSearchTopImpressionShare(campaign, emailAddress) {
+function checkSearchTopImpressionShare(campaign, emailAddress, dateRange, lookbackDays) {
   var report = AdsApp.report(
     "SELECT CampaignName, SearchTopImpressionShare " +
     "FROM CAMPAIGN_PERFORMANCE_REPORT " +
     "WHERE CampaignName = '" + campaign.getName() + "' " +
-    "DURING YESTERDAY"
+    "DURING " + dateRange
   );
 
   var rows = report.rows();
@@ -74,12 +100,12 @@ function checkSearchTopImpressionShare(campaign, emailAddress) {
 
     if (searchTopImpressionShare < 0.5) {
       var subject = "Campaign Performance Alert - Low Search Top Impression Share";
-      var body = "The campaign '" + campaign.getName() + "' had a Search Top Impression Share of " + 
-                 (searchTopImpressionShare * 100).toFixed(2) + "% yesterday. " +
+      var body = "The campaign '" + campaign.getName() + "' had a " + lookbackDays + "-day average Search Top Impression Share of " + 
+                 (searchTopImpressionShare * 100).toFixed(2) + "%. " +
                  "This might indicate that competitors are outbidding us.";
       
       MailApp.sendEmail(emailAddress, subject, body);
-      Logger.log("Email sent to " + emailAddress + " about low Search Top Impression Share.");
+      Logger.log("Email sent to " + emailAddress + " about low " + lookbackDays + "-day average Search Top Impression Share.");
     }
   }
 }
