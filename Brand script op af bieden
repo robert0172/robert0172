@@ -6,6 +6,7 @@ function main() {
   var lookbackDays = 14;
   var clickThreshold = 10;
   var clickThresholdDays = 30;
+  var maxBid = 1.00; // Maximum bid set to €1
 
   var campaign = AdsApp.campaigns()
     .withCondition("Name = '" + campaignName + "'")
@@ -29,6 +30,8 @@ function main() {
     "DURING " + clickThresholdDateRange
   );
 
+  var adjustments = [];
+
   var rows = report.rows();
   while (rows.hasNext()) {
     var row = rows.next();
@@ -39,19 +42,22 @@ function main() {
 
     Logger.log("Analyzing keyword: " + keyword + " (Clicks in last 30 days: " + clicks + ")");
 
-    if (searchImpressionShare < targetSIS) {
-      var newBid = currentBid + bidAdjustment;
-      adjustBid(keyword, currentBid, newBid, "Increased", searchImpressionShare, targetSIS, lookbackDays);
+    if (searchImpressionShare < targetSIS && currentBid < maxBid) {
+      var newBid = Math.min(currentBid + bidAdjustment, maxBid);
+      adjustments.push(adjustBid(keyword, currentBid, newBid, "Increased", searchImpressionShare, targetSIS, lookbackDays));
     } else if (searchImpressionShare > targetSIS) {
       var newBid = currentBid - bidAdjustment;
-      adjustBid(keyword, currentBid, newBid, "Decreased", searchImpressionShare, targetSIS, lookbackDays);
+      adjustments.push(adjustBid(keyword, currentBid, newBid, "Decreased", searchImpressionShare, targetSIS, lookbackDays));
     } else {
       Logger.log("No change for keyword: " + keyword + " (" + lookbackDays + "-day avg SIS: " + 
                  (searchImpressionShare * 100).toFixed(2) + "% matches target SIS: " + (targetSIS * 100).toFixed(2) + "%)");
     }
   }
 
-  checkSearchTopImpressionShare(campaign, emailAddress, dateRange, lookbackDays);
+  // Send weekly email report on Monday
+  if (new Date().getDay() === 1) {
+    sendWeeklyReport(emailAddress, adjustments);
+  }
 }
 
 function getDateRange(daysAgo) {
@@ -78,34 +84,26 @@ function adjustBid(keyword, oldBid, newBid, action, currentSIS, targetSIS, lookb
     keywordEntity.bidding().setCpc(newBid);
     
     var change = Math.abs(newBid - oldBid).toFixed(2);
-    Logger.log(action + " bid for keyword: " + keyword + " by €" + change + 
+    var logMessage = action + " bid for keyword: " + keyword + " by €" + change + 
                " (Old bid: €" + oldBid.toFixed(2) + ", New bid: €" + newBid.toFixed(2) + "). " +
                "Reason: " + lookbackDays + "-day avg SIS is " + (currentSIS * 100).toFixed(2) + "%, " +
-               (action === "Increased" ? "below" : "above") + " target SIS of " + (targetSIS * 100).toFixed(2) + "%.");
+               (action === "Increased" ? "below" : "above") + " target SIS of " + (targetSIS * 100).toFixed(2) + "%.";
+    Logger.log(logMessage);
+    return logMessage;
   }
+  return null;
 }
 
-function checkSearchTopImpressionShare(campaign, emailAddress, dateRange, lookbackDays) {
-  var report = AdsApp.report(
-    "SELECT CampaignName, SearchTopImpressionShare " +
-    "FROM CAMPAIGN_PERFORMANCE_REPORT " +
-    "WHERE CampaignName = '" + campaign.getName() + "' " +
-    "DURING " + dateRange
-  );
-
-  var rows = report.rows();
-  if (rows.hasNext()) {
-    var row = rows.next();
-    var searchTopImpressionShare = parseFloat(row['SearchTopImpressionShare']) / 100;
-
-    if (searchTopImpressionShare < 0.5) {
-      var subject = "Campaign Performance Alert - Low Search Top Impression Share";
-      var body = "The campaign '" + campaign.getName() + "' had a " + lookbackDays + "-day average Search Top Impression Share of " + 
-                 (searchTopImpressionShare * 100).toFixed(2) + "%. " +
-                 "This might indicate that competitors are outbidding us.";
-      
-      MailApp.sendEmail(emailAddress, subject, body);
-      Logger.log("Email sent to " + emailAddress + " about low " + lookbackDays + "-day average Search Top Impression Share.");
-    }
+function sendWeeklyReport(emailAddress, adjustments) {
+  var subject = "Weekly Bid Adjustment Report for Search - branded - Skydreams";
+  var body = "Here are the bid adjustments made in the past week:\n\n";
+  
+  body += adjustments.filter(adj => adj !== null).join("\n\n");
+  
+  if (adjustments.length === 0) {
+    body += "No bid adjustments were made this week.";
   }
+
+  MailApp.sendEmail(emailAddress, subject, body);
+  Logger.log("Weekly report email sent to " + emailAddress);
 }
