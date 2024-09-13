@@ -1,0 +1,220 @@
+var SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1_G8qinEPKf0rvb8gJzPHIShVtwpqnAWvyWJsU50Qc9o/edit?gid=0#gid=0';
+var DEFAULT_EMAIL_ADDRESS = 'robert.creutzburg@skydreams.nl';
+var SEND_EMAIL = true;
+var EMAIL_SUBJECT = "Search Partners Performance Alert";
+var EMAIL_BODY_TEMPLATE = "..."; // Uw bestaande e-mail sjabloon
+
+function main() {
+  var ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  var sheet = ss.getSheetByName('searchpartners');
+  var data = sheet.getDataRange().getValues();
+
+  var accountFlags = {};
+  for (var i = 1; i < data.length; i++) {
+    var accountId = data[i][0];
+    if (accountId) {
+      accountFlags[accountId] = {
+        campaignLabel: data[i][1] || '',
+        reportUrl: data[i][2],
+        clickThreshold: data[i][3] || 0,
+        cpaDiffThreshold: data[i][4] || 0,
+        period: data[i][5] || 'LAST_365_DAYS',
+        emailAddresses: data[i][6] || DEFAULT_EMAIL_ADDRESS
+      };
+    }
+  }
+
+  var accountSelector = AdsManagerApp.accounts().withIds(Object.keys(accountFlags));
+  accountSelector.executeInParallel("processClientAccount", "afterProcessAllClientAccounts", JSON.stringify(accountFlags));
+}
+
+function processClientAccount(accountFlagsString) {
+  var accountFlags = JSON.parse(accountFlagsString);
+  var accountId = AdsApp.currentAccount().getCustomerId();
+  var flags = accountFlags[accountId];
+
+  if (!flags) {
+    Logger.log("Geen configuratie gevonden voor account " + accountId);
+    return JSON.stringify({accountId: accountId, issues: []});
+  }
+
+  var accountName = AdsApp.currentAccount().getName();
+  var accountIssues = [];
+
+  try {
+    var accountSheet = SpreadsheetApp.openByUrl(flags.reportUrl).getActiveSheet();
+    accountSheet.clear();
+    var header = ["Account Name", "Campaign Name", "Clicks GoogleNetwork", "Clicks SearchPartners", "Diff", "Avg CPC GoogleNetwork", "Avg CPC SearchPartners", "Diff", "Cost GoogleNetwork", "Cost SearchPartners", "Diff", "Conversions GoogleNetwork", "Conversions SearchPartners", "Diff", "Cost/Conv GoogleNetwork", "Cost/Conv SearchPartners", "Diff"];
+    accountSheet.appendRow(header);
+
+    var campaignIds = getCampaignIdsWithLabel(flags.campaignLabel);
+    if (campaignIds.length === 0) {
+      Logger.log("Geen campagnes gevonden met label: " + flags.campaignLabel);
+      return JSON.stringify({accountId: accountId, issues: []});
+    }
+
+    var report = AdsApp.report(
+      'SELECT CampaignName, CampaignId, Clicks, Cost, AverageCpc, Conversions ' +
+      'FROM CAMPAIGN_PERFORMANCE_REPORT ' +
+      'WHERE CampaignStatus = "ENABLED" ' +
+      'AND AdNetworkType2 = "SEARCH_PARTNERS" ' +
+      'AND Clicks > ' + flags.clickThreshold +
+      ' AND CampaignId IN [' + campaignIds.join(",") + ']' +
+      ' DURING ' + flags.period
+    );
+
+    var campaignSearchPartnerStatsObjArray = [];
+    var rows = report.rows();
+    while (rows.hasNext()) {
+      var row = rows.next();
+      var conversions = parseFloat(row['Conversions']);
+      var cost = parseFloat(row['Cost']);
+      var costPerConversion = conversions > 0 ? cost / conversions : 0;
+
+      var campaignSearchPartnerStatsObj = {
+        campaignName: row['CampaignName'],
+        campaignId: row['CampaignId'],
+        clicks: parseInt(row['Clicks']),
+        cost: cost,
+        avgcpc: parseFloat(row['AverageCpc']),
+        conversions: conversions,
+        costPerConversion: costPerConversion
+      };
+
+      campaignSearchPartnerStatsObjArray.push(campaignSearchPartnerStatsObj);
+    }
+
+    if (campaignSearchPartnerStatsObjArray.length > 0) {
+      var campaignGoogleNetworkStatsObjArray = getCampaignGoogleNetworkStats(campaignIds, flags.period);
+
+      for (var j = 0; j < campaignIds.length; j++) {
+        var campaignId = campaignIds[j];
+        var campaignGoogleNetworkStatsObj = getObject(campaignGoogleNetworkStatsObjArray, campaignId);
+        var campaignSearchPartnerStatsObj = getObject(campaignSearchPartnerStatsObjArray, campaignId);
+
+        if (campaignGoogleNetworkStatsObj && campaignSearchPartnerStatsObj) {
+          var absCpaDiff = Math.abs((campaignSearchPartnerStatsObj.costPerConversion - campaignGoogleNetworkStatsObj.costPerConversion) / campaignGoogleNetworkStatsObj.costPerConversion);
+          if (absCpaDiff > flags.cpaDiffThreshold) {
+            var issue = [
+              accountName,
+              campaignGoogleNetworkStatsObj.campaignName,
+              campaignGoogleNetworkStatsObj.clicks,
+              campaignSearchPartnerStatsObj.clicks,
+              ((campaignSearchPartnerStatsObj.clicks - campaignGoogleNetworkStatsObj.clicks) / campaignGoogleNetworkStatsObj.clicks).toFixed(2),
+              campaignGoogleNetworkStatsObj.avgcpc.toFixed(2),
+              campaignSearchPartnerStatsObj.avgcpc.toFixed(2),
+              ((campaignSearchPartnerStatsObj.avgcpc - campaignGoogleNetworkStatsObj.avgcpc) / campaignGoogleNetworkStatsObj.avgcpc).toFixed(2),
+              campaignGoogleNetworkStatsObj.cost.toFixed(2),
+              campaignSearchPartnerStatsObj.cost.toFixed(2),
+              ((campaignSearchPartnerStatsObj.cost - campaignGoogleNetworkStatsObj.cost) / campaignGoogleNetworkStatsObj.cost).toFixed(2),
+              campaignGoogleNetworkStatsObj.conversions.toFixed(2),
+              campaignSearchPartnerStatsObj.conversions.toFixed(2),
+              ((campaignSearchPartnerStatsObj.conversions - campaignGoogleNetworkStatsObj.conversions) / campaignGoogleNetworkStatsObj.conversions).toFixed(2),
+              campaignGoogleNetworkStatsObj.costPerConversion.toFixed(2),
+              campaignSearchPartnerStatsObj.costPerConversion.toFixed(2),
+              ((campaignSearchPartnerStatsObj.costPerConversion - campaignGoogleNetworkStatsObj.costPerConversion) / campaignGoogleNetworkStatsObj.costPerConversion).toFixed(2)
+            ];
+            accountIssues.push(issue);
+            accountSheet.appendRow(issue);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log("Fout bij verwerken van account " + accountId + ": " + e.message);
+  }
+
+  return JSON.stringify({
+    accountName: accountName,
+    accountId: accountId,
+    issues: accountIssues
+  });
+}
+
+function afterProcessAllClientAccounts(results, originalFlags) {
+  var allIssues = [];
+  var flags;
+  
+  try {
+    flags = JSON.parse(originalFlags);
+  } catch (e) {
+    Logger.log("Fout bij het parsen van originalFlags: " + e.message);
+    return; // Stop de uitvoering als we geen geldige flags hebben
+  }
+  
+  results.forEach(function(result) {
+    if (result.getReturnValue()) {
+      var accountResult = JSON.parse(result.getReturnValue());
+      allIssues = allIssues.concat(accountResult.issues);
+    }
+  });
+
+  var totalNrOfIssues = allIssues.length;
+
+  if (totalNrOfIssues > 0 && SEND_EMAIL) {
+    var emailBody = EMAIL_BODY_TEMPLATE
+      .replace("{CLICK_THRESHOLD}", flags[Object.keys(flags)[0]].clickThreshold)
+      .replace("{PERIOD}", flags[Object.keys(flags)[0]].period)
+      .replace("{CPA_DIFF_THRESHOLD}", flags[Object.keys(flags)[0]].cpaDiffThreshold)
+      .replace("{SPREADSHEET_URL}", SPREADSHEET_URL)
+      .replace("{EMAIL_ADDRESSES}", DEFAULT_EMAIL_ADDRESS);
+
+    MailApp.sendEmail(DEFAULT_EMAIL_ADDRESS, EMAIL_SUBJECT, emailBody);
+  }
+
+  Logger.log("Totaal aantal problemen gevonden: " + totalNrOfIssues);
+}
+
+function getCampaignIdsWithLabel(label) {
+  var campaignIds = [];
+  if (label) {
+    var labelIterator = AdsApp.labels()
+      .withCondition("Name = '" + label + "'")
+      .get();
+
+    if (labelIterator.hasNext()) {
+      var labelObj = labelIterator.next();
+      var campaignIterator = labelObj.campaigns().get();
+      while (campaignIterator.hasNext()) {
+        campaignIds.push(campaignIterator.next().getId());
+      }
+    }
+  }
+  return campaignIds;
+}
+
+function getCampaignGoogleNetworkStats(campaignIds, period) {
+  var report = AdsApp.report(
+    'SELECT CampaignName, CampaignId, Clicks, Cost, AverageCpc, Conversions ' +
+    'FROM CAMPAIGN_PERFORMANCE_REPORT ' +
+    'WHERE CampaignId IN [' + campaignIds.join(",") + ']' +
+    ' AND AdNetworkType2 = "SEARCH" ' +
+    ' DURING ' + period
+  );
+
+  var campaignGoogleNetworkStatsObjArray = [];
+  var rows = report.rows();
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var conversions = parseFloat(row['Conversions']);
+    var cost = parseFloat(row['Cost']);
+    var campaignGoogleNetworkStatsObj = {
+      campaignName: row['CampaignName'],
+      campaignId: row['CampaignId'],
+      clicks: parseInt(row['Clicks']),
+      cost: cost,
+      avgcpc: parseFloat(row['AverageCpc']),
+      conversions: conversions,
+      costPerConversion: conversions > 0 ? cost / conversions : 0
+    };
+
+    campaignGoogleNetworkStatsObjArray.push(campaignGoogleNetworkStatsObj);
+  }
+  return campaignGoogleNetworkStatsObjArray;
+}
+
+function getObject(array, campaignId) {
+  return array.find(function(obj) {
+    return obj.campaignId === campaignId;
+  });
+}
