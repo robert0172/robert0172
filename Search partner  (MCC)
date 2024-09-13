@@ -5,6 +5,7 @@ var EMAIL_SUBJECT = "Search Partners Performance Alert";
 var EMAIL_BODY_TEMPLATE = "..."; // Uw bestaande e-mail sjabloon
 
 function main() {
+  Logger.log("Script gestart");
   var ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
   var sheet = ss.getSheetByName('searchpartners');
   var data = sheet.getDataRange().getValues();
@@ -19,26 +20,42 @@ function main() {
         clickThreshold: data[i][3] || 0,
         cpaDiffThreshold: data[i][4] || 0,
         period: data[i][5] || 'LAST_365_DAYS',
-        emailAddresses: data[i][6] || DEFAULT_EMAIL_ADDRESS
+        emailAddresses: data[i][6] || DEFAULT_EMAIL_ADDRESS,
+        rowIndex: i + 1 // Bewaar de rij-index voor later gebruik
       };
     }
   }
 
+  Logger.log("Aantal accounts geladen: " + Object.keys(accountFlags).length);
+
+  var startTime = new Date();
   var accountSelector = AdsManagerApp.accounts().withIds(Object.keys(accountFlags));
-  accountSelector.executeInParallel("processClientAccount", "afterProcessAllClientAccounts", JSON.stringify(accountFlags));
+  var inputData = JSON.stringify({accountFlags: accountFlags, startTime: startTime.toISOString()});
+  Logger.log("Input data voor executeInParallel: " + inputData);
+  
+  // Sla de inputData op in een script-eigenschap
+  PropertiesService.getScriptProperties().setProperty('inputData', inputData);
+  
+  accountSelector.executeInParallel("processClientAccount", "afterProcessAllClientAccounts");
 }
 
-function processClientAccount(accountFlagsString) {
-  var accountFlags = JSON.parse(accountFlagsString);
+function processClientAccount() {
+  var scriptProperties = PropertiesService.getScriptProperties();
+  var inputString = scriptProperties.getProperty('inputData');
+  
+  Logger.log("processClientAccount gestart met input: " + inputString);
+  var input = JSON.parse(inputString);
+  var accountFlags = input.accountFlags;
   var accountId = AdsApp.currentAccount().getCustomerId();
   var flags = accountFlags[accountId];
 
   if (!flags) {
     Logger.log("Geen configuratie gevonden voor account " + accountId);
-    return JSON.stringify({accountId: accountId, issues: []});
+    return JSON.stringify({accountId: accountId, issues: [], error: "Geen configuratie gevonden"});
   }
 
   var accountName = AdsApp.currentAccount().getName();
+  Logger.log("Verwerking van account: " + accountName + " (ID: " + accountId + ")");
   var accountIssues = [];
 
   try {
@@ -48,9 +65,10 @@ function processClientAccount(accountFlagsString) {
     accountSheet.appendRow(header);
 
     var campaignIds = getCampaignIdsWithLabel(flags.campaignLabel);
+    Logger.log("Aantal campagnes gevonden met label '" + flags.campaignLabel + "': " + campaignIds.length);
     if (campaignIds.length === 0) {
       Logger.log("Geen campagnes gevonden met label: " + flags.campaignLabel);
-      return JSON.stringify({accountId: accountId, issues: []});
+      return JSON.stringify({accountId: accountId, issues: [], error: "Geen campagnes gevonden met label: " + flags.campaignLabel});
     }
 
     var report = AdsApp.report(
@@ -83,6 +101,8 @@ function processClientAccount(accountFlagsString) {
 
       campaignSearchPartnerStatsObjArray.push(campaignSearchPartnerStatsObj);
     }
+
+    Logger.log("Aantal campagnes met zoekpartners data: " + campaignSearchPartnerStatsObjArray.length);
 
     if (campaignSearchPartnerStatsObjArray.length > 0) {
       var campaignGoogleNetworkStatsObjArray = getCampaignGoogleNetworkStats(campaignIds, flags.period);
@@ -120,32 +140,83 @@ function processClientAccount(accountFlagsString) {
         }
       }
     }
+    
+    var returnValue = JSON.stringify({
+      accountName: accountName,
+      accountId: accountId,
+      issues: accountIssues,
+      error: null
+    });
+    Logger.log("Returning from processClientAccount: " + returnValue);
+    return returnValue;
   } catch (e) {
     Logger.log("Fout bij verwerken van account " + accountId + ": " + e.message);
+    return JSON.stringify({
+      accountName: accountName,
+      accountId: accountId,
+      issues: [],
+      error: e.message
+    });
   }
-
-  return JSON.stringify({
-    accountName: accountName,
-    accountId: accountId,
-    issues: accountIssues
-  });
 }
 
-function afterProcessAllClientAccounts(results, originalFlags) {
-  var allIssues = [];
-  var flags;
+function afterProcessAllClientAccounts(results) {
+  Logger.log("afterProcessAllClientAccounts gestart");
   
-  try {
-    flags = JSON.parse(originalFlags);
-  } catch (e) {
-    Logger.log("Fout bij het parsen van originalFlags: " + e.message);
-    return; // Stop de uitvoering als we geen geldige flags hebben
+  var scriptProperties = PropertiesService.getScriptProperties();
+  var originalInput = scriptProperties.getProperty('inputData');
+  
+  if (!originalInput) {
+    Logger.log("originalInput is undefined, skipping JSON parsing.");
+    return;
   }
   
-  results.forEach(function(result) {
+  Logger.log("Ontvangen originalInput: " + originalInput);
+  
+  var input;
+  try {
+    input = JSON.parse(originalInput);
+    Logger.log("Succesvolle JSON parse van originalInput");
+  } catch (e) {
+    Logger.log("Fout bij het parsen van originalInput: " + e.message);
+    return;
+  }
+  
+  var accountFlags = input.accountFlags;
+  var startTime = new Date(input.startTime);
+  var endTime = new Date();
+  var executionTimeInSeconds = (endTime - startTime) / 1000;
+
+  var allIssues = [];
+  var masterSheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL).getSheetByName('searchpartners');
+  
+  Logger.log("Aantal ontvangen resultaten: " + results.length);
+  results.forEach(function(result, index) {
+    Logger.log("Verwerking van resultaat " + (index + 1));
     if (result.getReturnValue()) {
-      var accountResult = JSON.parse(result.getReturnValue());
+      var accountResult;
+      try {
+        accountResult = JSON.parse(result.getReturnValue());
+        Logger.log("Succesvolle parse van resultaat voor account: " + accountResult.accountName);
+      } catch (e) {
+        Logger.log("Fout bij het parsen van resultaat: " + e.message);
+        return;
+      }
+      
       allIssues = allIssues.concat(accountResult.issues);
+
+      // Update de mastersheet met de uitvoeringstijd en foutmelding
+      var flags = accountFlags[accountResult.accountId];
+      if (flags) {
+        var rowIndex = flags.rowIndex;
+        masterSheet.getRange(rowIndex, 8).setValue(new Date().toLocaleString()); // LastRun in MCCTIME
+        masterSheet.getRange(rowIndex, 9).setValue(accountResult.error || ''); // Error message
+        Logger.log("Mastersheet bijgewerkt voor account: " + accountResult.accountName);
+      } else {
+        Logger.log("Geen flags gevonden voor account: " + accountResult.accountName);
+      }
+    } else {
+      Logger.log("Geen returnwaarde voor resultaat " + (index + 1));
     }
   });
 
@@ -153,19 +224,22 @@ function afterProcessAllClientAccounts(results, originalFlags) {
 
   if (totalNrOfIssues > 0 && SEND_EMAIL) {
     var emailBody = EMAIL_BODY_TEMPLATE
-      .replace("{CLICK_THRESHOLD}", flags[Object.keys(flags)[0]].clickThreshold)
-      .replace("{PERIOD}", flags[Object.keys(flags)[0]].period)
-      .replace("{CPA_DIFF_THRESHOLD}", flags[Object.keys(flags)[0]].cpaDiffThreshold)
+      .replace("{CLICK_THRESHOLD}", accountFlags[Object.keys(accountFlags)[0]].clickThreshold)
+      .replace("{PERIOD}", accountFlags[Object.keys(accountFlags)[0]].period)
+      .replace("{CPA_DIFF_THRESHOLD}", accountFlags[Object.keys(accountFlags)[0]].cpaDiffThreshold)
       .replace("{SPREADSHEET_URL}", SPREADSHEET_URL)
       .replace("{EMAIL_ADDRESSES}", DEFAULT_EMAIL_ADDRESS);
 
     MailApp.sendEmail(DEFAULT_EMAIL_ADDRESS, EMAIL_SUBJECT, emailBody);
+    Logger.log("E-mail verzonden naar: " + DEFAULT_EMAIL_ADDRESS);
   }
 
   Logger.log("Totaal aantal problemen gevonden: " + totalNrOfIssues);
+  Logger.log("Totale uitvoeringstijd: " + executionTimeInSeconds + " seconden");
 }
 
 function getCampaignIdsWithLabel(label) {
+  Logger.log("getCampaignIdsWithLabel aangeroepen met label: " + label);
   var campaignIds = [];
   if (label) {
     var labelIterator = AdsApp.labels()
@@ -180,10 +254,12 @@ function getCampaignIdsWithLabel(label) {
       }
     }
   }
+  Logger.log("Aantal campagne IDs gevonden: " + campaignIds.length);
   return campaignIds;
 }
 
 function getCampaignGoogleNetworkStats(campaignIds, period) {
+  Logger.log("getCampaignGoogleNetworkStats aangeroepen voor " + campaignIds.length + " campagnes");
   var report = AdsApp.report(
     'SELECT CampaignName, CampaignId, Clicks, Cost, AverageCpc, Conversions ' +
     'FROM CAMPAIGN_PERFORMANCE_REPORT ' +
@@ -210,6 +286,7 @@ function getCampaignGoogleNetworkStats(campaignIds, period) {
 
     campaignGoogleNetworkStatsObjArray.push(campaignGoogleNetworkStatsObj);
   }
+  Logger.log("Aantal campagnes met Google Network stats: " + campaignGoogleNetworkStatsObjArray.length);
   return campaignGoogleNetworkStatsObjArray;
 }
 
