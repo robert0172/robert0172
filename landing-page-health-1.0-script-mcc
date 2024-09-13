@@ -1,0 +1,407 @@
+/**
+ * Google Ads Landing Page Health Check Script
+ * Follow me on LinkedIn for more: https://www.linkedin.com/in/marc-cornelius/
+ * Sub to my newsletter for the latest scripts & hacks: https://marccornelius.com/newsletter
+ *
+ * This script evaluates the health of landing pages within the current Google Ads account by checking load times,
+ * mobile-friendliness, redirects, tracking scripts like GTM, GA & Ads pixel (but not when they're in GTM), HTTPS usage, 404 errors, 301 redirects, and DNS errors.
+ * It provides detailed reports via email and spreadsheet output, noting potential issues such as missing tags.
+ *
+ * Note on GTM Detection:
+ * If the script reports that GTM is not found but you believe it is present, it's possible that a cookie banner 
+ * is blocking its detection. This script cannot check for cookie banner interference. Additionally, it's allowed 
+ * to load GTM before obtaining consent, as long as the permissions in GTM are properly configured.
+ *
+ * Instructions:
+ * 1. Copy this entire script into your Google Ads account under Tools & Settings > Bulk Actions > Scripts.
+ * 2. Modify the configuration settings below to enable or disable checks as needed.
+ * 3. Run the script to check your landing pages and receive a report based on the enabled checks.
+ * It can take 5 - 60 minutes for this script to complete. So give it some time :). Depending on your MCC account. 
+ *
+ * Note: Ensure you have the necessary permissions to access the Google Ads scripts functionality.
+ * Note2: If you have any requests / suggestions for Health Check Script v2.0, send me a message on LinkedIn :) Also if anything is not working.
+ * I'll make sure the latest script can always be found in this URL: https://docs.google.com/document/d/1h461sYcsck7n6X70Q3AGaaDLzvOU3pNNxqkyuIYvlvA
+ * Note3: SSL Error in the script? But you can't see it when browsing the website? Run https://www.ssllabs.com/ssltest/. There are various errors possible with the SSL certificate which can not be seen by browsing the URL. 
+ * It could also be that the SSL certificate has only included a www. or non-www. variant. This might also trigger a SSL error. 
+ * Note4: There seems to be a tiny issue when scanning websites containing Redirects. The script might also show in the output that the website is missing GTM etc. A bit obvious. Nothing harmful, but it might add an extra row in the output. 
+ *
+ * 
+ * UPDATED 20240818 by David Peake: https://www.linkedin.com/in/davidjpeake/
+ * - Remove the startAccountName configuration and add a new accountLabel filter.
+ * - Modify the getAllLandingPageUrls function to only scan enabled keywords and ads within enabled campaigns.
+ * - Fix issue with script still checking redirects when checkRedirects = false.
+ * - Add "Google Gtag Pixel" to GTM check for Shopify sites using Google & YouTube app.
+ * - Add pattern for WordPress sites optimized with LSCWP, as LiteSpeed base64 encodes the GTM snippet.
+ * - Update all Logger.log statements to console.log.
+ * 
+*/
+
+// Configuration Settings
+var config = {
+  checkLoadTime: true,
+  checkMobileFriendly: true,
+  checkRedirects: false,
+  checkGTM: true,
+  checkHTTPS: true,
+  sendEmail: true,
+  updateSpreadsheet: true,
+  accountLabel: '' // Add the label of the accounts to process. Leave blank to process all accounts.
+};
+
+// Thresholds and Limits
+var LOAD_TIME_THRESHOLD = 4000; // milliseconds
+var MAX_REDIRECTS = 3;
+var MAX_URLS_PER_ACCOUNT = Infinity;
+var MAX_ACCOUNTS_TO_CHECK = Infinity;
+var EMAIL_ADDRESS = 'xx';
+var SPREADSHEET_ID = 'xx';
+var SHEET_NAME = 'Landing Page Health';
+
+function main() {
+  var accountIterator = AdsManagerApp.accounts().get();
+  if (config.accountLabel) {
+    accountIterator = AdsManagerApp.accounts()
+      .withCondition("LabelNames CONTAINS '" + config.accountLabel + "'")
+      .get();
+  }
+  
+  var accountsChecked = 0;
+  var allResults = {};
+
+  while (accountIterator.hasNext() && accountsChecked < MAX_ACCOUNTS_TO_CHECK) {
+    var account = accountIterator.next();
+    AdsManagerApp.select(account);
+    var urlsToCheck = getAllLandingPageUrls();
+    var results = checkUrls(urlsToCheck);
+    if (Object.keys(results).some(key => results[key].length > 0)) {
+      allResults[account.getName()] = results;
+    }
+    accountsChecked++;
+  }
+
+  if (Object.keys(allResults).length > 0) {
+    if (config.sendEmail) {
+      sendEmail(allResults, accountsChecked);
+    }
+    if (config.updateSpreadsheet) {
+      updateSpreadsheet(allResults, accountsChecked);
+    }
+  } else {
+    console.log("No issues detected with URLs across all checked accounts.");
+  }
+}
+
+function getAllLandingPageUrls() {
+  var urls = {};
+  
+  // Get all enabled campaigns
+  var campaignIterator = AdsApp.campaigns()
+    .withCondition("Status = ENABLED")
+    .get();
+  
+  while (campaignIterator.hasNext()) {
+    var campaign = campaignIterator.next();
+    
+    // Get enabled ads from enabled campaigns
+    var adIterator = campaign.ads()
+      .withCondition("Status = ENABLED")
+      .get();
+    
+    while (adIterator.hasNext()) {
+      var ad = adIterator.next();
+      var finalUrl = ad.urls().getFinalUrl();
+      if (finalUrl) urls[finalUrl] = true;
+    }
+    
+    // Get enabled keywords from enabled campaigns
+    var keywordIterator = campaign.keywords()
+      .withCondition("Status = ENABLED")
+      .get();
+    
+    while (keywordIterator.hasNext()) {
+      var keyword = keywordIterator.next();
+      var finalUrl = keyword.urls().getFinalUrl();
+      if (finalUrl) urls[finalUrl] = true;
+    }
+  }
+
+  return Object.keys(urls).slice(0, MAX_URLS_PER_ACCOUNT);
+}
+
+function checkUrls(urls) {
+  var results = {
+    slowUrls: [],
+    httpErrors: [],
+    mobileUnfriendly: [],
+    tooManyRedirects: [],
+    dnsErrors: [],
+    redirects: [],
+    deadLinks: [],
+    missingTags: [],
+    notHTTPS: []
+  };
+
+  urls.forEach(url => {
+    var checkResult = checkUrl(url);
+    if (!checkResult) {
+      console.log('Failed to check URL: ' + url);
+      return;
+    }
+
+    if ((config.checkRedirects && checkResult.redirectDetected) || checkResult.httpStatus >= 400 || !checkResult.isHTTPS) {
+      if (config.checkRedirects && checkResult.redirectDetected) {
+        results.redirects.push({
+          url: url,
+          redirectDetails: checkResult.redirectDetails
+        });
+      }
+      if (checkResult.httpStatus >= 400) {
+        results.httpErrors.push({url: url, status: checkResult.httpStatus});
+      }
+      if (!checkResult.isHTTPS) {
+        results.notHTTPS.push({url: url});
+      }
+      // Skip adding results related to tags if major issues are detected
+    } else {
+      if (config.checkMobileFriendly && !checkResult.mobileFriendly) {
+        results.mobileUnfriendly.push({url: url});
+      }
+      if (checkResult.dnsError) {
+        results.dnsErrors.push({url: url});
+      }
+      if (config.checkGTM && !checkResult.hasGTM && !checkResult.hasGA && !checkResult.hasConversionPixel) {
+        var missingTags = [];
+        if (!checkResult.hasGTM) missingTags.push("GTM");
+        if (!checkResult.hasGA) missingTags.push("GA");
+        if (!checkResult.hasConversionPixel) missingTags.push("Ads Pixel");
+        results.missingTags.push({url: url, missing: missingTags.join(", ")});
+      }
+    }
+  });
+
+  return results;
+}
+
+function checkUrl(url) {
+  var result = {
+    loadTime: 0,
+    httpStatus: 200,
+    mobileFriendly: true,
+    redirectCount: 0,
+    redirectDetected: false,
+    finalUrl: url,
+    hasGTM: false,
+    gtmDebugInfo: '',
+    hasGA: false,
+    gaDebugInfo: '',
+    hasConversionPixel: false,
+    conversionPixelDebugInfo: '',
+    dnsError: false,
+    isHTTPS: false,
+    sslCheck: "Not Checked",
+    redirectDetails: []
+  };
+
+  try {
+    var response = UrlFetchApp.fetch(url, {followRedirects: !config.checkRedirects, muteHttpExceptions: true});
+    result.httpStatus = response.getResponseCode();
+    result.finalUrl = response.getHeaders()['Location'] || url;
+
+    // Handle redirects only if checkRedirects is true
+    if (config.checkRedirects) {
+      while (response.getResponseCode() >= 300 && response.getResponseCode() < 400 && result.redirectCount < MAX_REDIRECTS) {
+        result.redirectCount++;
+        result.redirectDetails.push({
+          url: result.finalUrl,
+          status: response.getResponseCode()
+        });
+        url = result.finalUrl;
+        response = UrlFetchApp.fetch(url, {followRedirects: false, muteHttpExceptions: true});
+        result.finalUrl = response.getHeaders()['Location'] || url;
+      }
+    }
+
+    result.isHTTPS = result.finalUrl.toLowerCase().startsWith('https://');
+    result.redirectDetected = result.redirectCount > 0;
+    
+    // Return early if a redirect is detected (and we're checking for redirects), or there is an HTTP error or HTTPS issue
+    if ((config.checkRedirects && result.redirectDetected) || result.httpStatus >= 400 || !result.isHTTPS) {
+      return result;
+    }
+
+    // Proceed with other checks if no significant issues are detected
+    var content = response.getContentText();
+    performOtherChecks(content, result);
+  } catch (e) {
+    console.log("Error fetching URL: " + url + ". Error: " + e.message);
+    result.httpStatus = 500; // Set a default error HTTP status
+    if (e.message.indexOf("DNS") !== -1) {
+      result.dnsError = true;
+    }
+    return result; // Return result early due to an exception
+  }
+
+  return result;
+}
+
+function performOtherChecks(content, result) {
+  var lowerContent = content.toLowerCase();
+
+  // Check for GTM, GA, and conversion pixels
+  result.hasGTM = hasGTM(lowerContent);
+  if (result.hasGTM) {
+    result.gtmDebugInfo = "GTM detected in response content.";
+  } else {
+    detectGAAndConversionPixel(lowerContent, result);
+  }
+}
+
+function hasGTM(content) {
+    var gtmPatterns = [
+        'googletagmanager\\.com',
+        'google tag manager',
+        'gtm4wp\\.com', 
+        'gtm\\.js',
+        'gtag/js',
+        'gtag/js\\?id=',
+        '\\bgtm-',
+        '\\bgtag-',
+        '<!-- Google Tag Manager -->',
+        '"Google Gtag Pixel"', // Pattern for Shopify Google & YouTube app
+        '<!-- Google Tag Manager (noscript) -->',
+        '\\bGTM\\b',
+        'src="data:text/javascript;base64,KGZ1bmN0aW9uKHcsZCxzLGwsaSl7d1tsXT13W2xdfHxbXTt3W2xdLnB1c2goeydndG0uc3RhcnQnOm5ldyBEYXRlKCkuZ2V0VGltZSgpLGV2ZW50OidndG0uanMnfSk7dmFyIGY9ZC5nZXRFbGVtZW50c0J5VGFnTmFtZShzKVswXSxqPWQuY3JlYXRlRWxlbWVudChzKSxkbD1sIT0nZGF0YUxheWVyJz8nJmw9JytsOicnO2ouYXN5bmM9ITA7ai5zcmM9J2h0dHBzOi8vd3d3Lmdvb2dsZXRhZ21hbmFnZXIuY29tL2d0bS5qcz9pZD0nK2krZGw7Zi5wYXJlbnROb2RlLmluc2VydEJlZm9yZShqLGYpfSkod2luZG93LGRvY3VtZW50LCdzY3JpcHQnLCdkYXRhTGF5ZXInLCdHVE0t' // Pattern for LSCWP base64 encoded GTM
+    ];
+    var regex = new RegExp(gtmPatterns.join('|'), 'i');
+    return regex.test(content);
+}
+
+function detectGAAndConversionPixel(content, result) {
+    var gaPatterns = [
+        'google-analytics\\.com/analytics.js',
+        'googletagmanager\\.com/gtag/js\\?id=',
+        '\\bga\\('
+    ];
+    result.hasGA = gaPatterns.some(pattern => new RegExp(pattern, 'i').test(content));
+    if (result.hasGA) {
+        result.gaDebugInfo = "GA detected in response content.";
+    }
+
+    var conversionPatterns = [
+        'googleadservices\\.com/pagead/conversion\\.js',
+        'googleads\\.g\\.doubleclick\\.net/pagead/viewthroughconversion',
+        'gtag\\(\'config\', \'AW-',
+        'gtag\\(\'event\', \'conversion\', {'
+    ];
+    result.hasConversionPixel = conversionPatterns.some(pattern => new RegExp(pattern, 'i').test(content));
+    if (result.hasConversionPixel) {
+        result.conversionPixelDebugInfo = "Ads Pixel detected in response content.";
+    }
+}
+
+function sendEmail(allResults, accountsChecked) {
+  var subject = 'Google Ads: URL Issues Detected (MCC Level Report)';
+  var body = '<html><body>';
+  body += '<h2>Google Ads URL Issues Report (MCC Level)</h2>';
+  body += '<p>Accounts checked: ' + accountsChecked + '</p>';
+  body += '<table border="1" cellpadding="5" style="border-collapse: collapse;">';
+  body += '<tr><th>Account Name</th><th>URL</th><th>Issue</th><th>Details</th></tr>';
+
+  var sortedAccounts = Object.keys(allResults).sort();
+
+  sortedAccounts.forEach(function(accountName) {
+    var results = allResults[accountName];
+    Object.keys(results).forEach(function(issueType) {
+      results[issueType].forEach(function(issue) {
+        var issueDetails = getIssueDetails(issueType, issue);
+        body += '<tr><td>' + accountName + '</td><td>' + issue.url + '</td><td>' + issueType + '</td><td>' + issueDetails + '</td></tr>';
+      });
+    });
+  });
+
+  body += '</table>';
+  body += '<p><a href="https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/edit">View in Google Sheets</a></p>';
+  body += '</body></html>';
+
+  MailApp.sendEmail({
+    to: EMAIL_ADDRESS,
+    subject: subject,
+    htmlBody: body
+  });
+}
+
+function updateSpreadsheet(allResults, accountsChecked) {
+  var spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(SHEET_NAME);
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) {
+    lastRow = 1;
+  }
+
+  if (lastRow === 1 && sheet.getRange(1, 1).getValue() === "") {
+    var headers = ['Date', 'Account Name', 'URL', 'Issue Type', 'Details'];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    lastRow = 1;
+  }
+
+  var currentDate = new Date().toISOString().split('T')[0];
+  var data = [];
+
+  var sortedAccounts = Object.keys(allResults).sort();
+  sortedAccounts.forEach(function(accountName) {
+    var results = allResults[accountName];
+    Object.keys(results).forEach(function(issueType) {
+      results[issueType].forEach(function(issue) {
+        var issueDetails = getIssueDetails(issueType, issue);
+        data.push([currentDate, accountName, issue.url, issueType, issueDetails]);
+      });
+    });
+  });
+
+  data.sort(function(a, b) {
+    return a[1].localeCompare(b[1]);
+  });
+
+  if (data.length > 0) {
+    sheet.getRange(lastRow + 1, 1, data.length, data[0].length).setValues(data);
+  }
+
+  var infoStartRow = lastRow + data.length + 2;
+  sheet.getRange(infoStartRow, 1).setValue('Summary');
+  sheet.getRange(infoStartRow + 1, 1).setValue('Date:');
+  sheet.getRange(infoStartRow + 1, 2).setValue(currentDate);
+  sheet.getRange(infoStartRow + 2, 1).setValue('Accounts Checked:');
+  sheet.getRange(infoStartRow + 2, 2).setValue(accountsChecked);
+  sheet.getRange(infoStartRow + 3, 1).setValue('Issues Found:');
+  sheet.getRange(infoStartRow + 3, 2).setValue(data.length);
+}
+
+function getIssueDetails(key, item) {
+  var details = '';
+  if (key === 'missingTags') {
+    details = 'Missing Tags: ' + item.missing;
+  } else if (key === 'redirects') {
+    var redirectPath = item.redirectDetails.map(r => r.url + ' (' + r.status + ')').join(' -> ');
+    details = 'Redirect Path: ' + redirectPath;
+  } else if (key === 'slowUrls') {
+    details = 'Slow Load Time: ' + item.loadTime + ' ms';
+  } else if (key === 'httpErrors') {
+    details = 'HTTP Error: Status ' + item.status;
+  } else if (key === 'mobileUnfriendly') {
+    details = 'Not Mobile Friendly';
+  } else if (key === 'dnsErrors') {
+    details = 'DNS Error: Unable to resolve domain';
+  } else if (key === 'notHTTPS') {
+    details = 'Not using HTTPS';
+  } else if (key === 'notFound') {
+    details = '404 Not Found';
+  } else {
+    details = key + ': ' + JSON.stringify(item);
+  }
+  return details;
+}
