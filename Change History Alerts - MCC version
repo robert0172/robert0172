@@ -1,0 +1,234 @@
+/**
+*
+* Change History Alerts - MCC version
+*
+* The script checks all the entries in the Google Ads change history of your accounts, 
+* and if there is a change by a user outside of your list of 'recognized' users, you will get an alert via email.
+* The alert mail contains the number of changes as well as a link to the Google Sheet that lists all changes by unrecognized users.
+*
+*/
+
+// CHANGE SETTINGS HERE
+var SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1lC85X4sCO-eWU5aZ7Ws3WxbpC4WZMmzdFxsJ87maSGs/edit?gid=0#gid=0"; //insert a new blank spreadsheet url between the double quotes 
+var EMAIL_ADDRESSES = "robert.creutzburg@skydreams.nl"; //alert email addresses, insert your email addresses between the double quotes. You can add multiple email addresses between the double quotes, just separate them via a comma, ie: "john@doe.com, jane@doe.com"
+
+var IGNORE_USERS = [
+  'robert.creutzburg@skydreams.nl',
+  'theo.vanbeusichem@skydreams.nl',
+  'jeroen.snoek@skydreams.nl'
+];
+// NOTE: if you want to add multiple users, add them between the square brackets, one per line, with a comma separating the lines. Ie:     
+//var IGNORE_USERS = [
+//      'john@doe.com',
+//      'jane@doe.com',
+//      'jill@johns.com'
+//    ];
+
+var SEND_EMAIL = true;
+var EMAIL_SUBJECT = "[GAds Script] - WARNING - Change by person outside of organisation";
+var EMAIL_BODY = 
+    "\n"+
+    "***\n"+
+    "\n"+
+    "This script checks changes in the 'Change history' :\n"+
+    "\n"+
+    "For all changes during "+PERIOD+" \n"+
+    "		check if there is a change being made by users other than "+IGNORE_USERS+" \n"+
+    "		if so, alerts are logged in Google Sheet: "+SPREADSHEET_URL+" \n"+
+    "\n"+
+    "If there is an alert an email is sent to:\n"+ EMAIL_ADDRESSES +"\n";
+
+var PERIOD = "LAST_7_DAYS";
+
+function main() { 
+  var accountSelector = MccApp.accounts()
+    .withLimit(50)  // Process 50 accounts per execution to avoid timeouts
+    .orderBy("Name");
+  
+  var accountIterator = accountSelector.get();
+  var totalAlerts = 0;
+  
+  while (accountIterator.hasNext()) {
+    var account = accountIterator.next();
+    MccApp.select(account);
+    
+    var accountName = account.getName();
+    Logger.log("Processing account: " + accountName);
+    
+    var changeAlerts = getChangeAlerts();
+    
+    if (changeAlerts.length > 0) {
+      reportResults(changeAlerts);
+      totalAlerts += changeAlerts.length;
+    } else {
+      Logger.log("Could not find any changes in change history that were made by users other than "+IGNORE_USERS+" \n");
+    }
+  }
+  
+  if (totalAlerts > 0 && SEND_EMAIL) {
+    sendEmail(totalAlerts);
+  }
+}
+
+function getChangeAlerts() {
+  var accountName = AdsApp.currentAccount().getName();
+  var changes = [];
+    
+  var query = "SELECT " + 
+              "campaign.name, " +
+              "ad_group.name, " +
+              "change_event.change_date_time, " +
+              "change_event.change_resource_type, " +
+              "change_event.changed_fields, " +
+              "change_event.client_type, " +
+              "change_event.feed, " +
+              "change_event.feed_item, " +
+              "change_event.new_resource, " +
+              "change_event.old_resource, " +
+              "change_event.resource_change_operation, " +
+              "change_event.resource_name, " +
+              "change_event.user_email " +
+              "FROM change_event " +
+              "WHERE change_event.change_date_time DURING "+PERIOD+" " + 
+              "AND change_event.user_email NOT IN ('"+IGNORE_USERS.join("', '")+"') "+
+              "ORDER BY change_event.change_date_time DESC "+ 
+              "LIMIT 9999 "; // max of 10k changes reported per request
+              
+  Logger.log("query: " + query);
+  
+  try {
+    var result = AdsApp.search(query);
+  } catch (e) {
+    alert("Issue retrieving results from search API: "+e);
+  } 
+  
+  while (result.hasNext()) {
+    var row = result.next();
+ 
+    var campaignName = "";
+    var adGroupName = "";
+    
+    // hack to prevent undefined variable from stopping script execution
+    try {
+      campaignName = row.campaign.name;
+      adGroupName = row.adGroup.name;
+    } catch(e) {
+    }
+    
+    try {    
+      var change = [
+        row.changeEvent.changeDateTime,
+        accountName,
+        row.changeEvent.userEmail,
+        row.changeEvent.clientType,
+        campaignName,
+        adGroupName,
+        row.changeEvent.changeResourceType,
+        row.changeEvent.changedFields,
+        row.changeEvent.feed,
+        row.changeEvent.feedItem,
+        row.changeEvent.newResource,
+        row.changeEvent.oldResource,
+        row.changeEvent.resourceChangeOperation
+      ];
+      
+      changes.push(change);
+      
+    } catch(e) {
+      Logger.log("Issue with parsing results from search API: "+e);
+    }
+  }
+ 
+  return changes;
+}
+
+function addHeaderToOutputSheet(sheet) {
+  try {
+    var headerSheet = SpreadsheetApp.openByUrl("https://docs.google.com/spreadsheets/d/1HnHwdCTeHGbedV-2gwed36U9YfUB9Bd45NFCFV5R4q4/").getSheetByName('header_sheet');
+  } catch(e) {
+    console.log(`### There was an issue opening the header sheet. Please download the latest version of this script at https://nilsrooijmans.com\n${e}`);
+    throw `### There was an issue opening the header sheet. Please download the latest version of this script at https://nilsrooijmans.com\n${e}`;
+  }
+  
+  var headerRange = headerSheet.getRange(1, 1, 2, headerSheet.getLastColumn());
+  var headerData = headerRange.getValues();
+  
+  console.log("Adding header to the output sheet"); 
+
+  var range=sheet.getRange(1,1,2,headerData[1].length);
+  range.clear();
+  range.clearFormat();
+  range.setValues(headerData)
+  range.setFontWeight("bold");
+  range = sheet.getRange(1,1,1,headerData[1].length);
+  range.setFontColor('#007BFF')
+  sheet.setFrozenRows(2);
+}
+
+function reportResults(changes) {
+  var sheet = prepareOutputSheet();
+  addOutputToSheet(changes, sheet);  
+}
+
+function prepareOutputSheet() {
+  var spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  if (!spreadsheet) {
+    alert("Cannot open new reporting spreadsheet") ;
+    return ;
+  }
+
+  var sheet = spreadsheet.getActiveSheet();
+  if (!sheet) {
+    alert("Cannot open new reporting sheet") ;
+    return ;
+  }  
+  
+  var numberOfRows=sheet.getLastRow() ;
+
+  // set width of columns
+  sheet.setColumnWidth(1, 150);
+  sheet.setColumnWidth(2, 200);
+  sheet.setColumnWidth(3, 300);
+  sheet.setColumnWidth(4, 300);
+  sheet.setColumnWidth(5, 300);
+  sheet.setColumnWidth(6, 300);
+  sheet.setColumnWidth(7, 100);
+  sheet.setColumnWidth(8, 100);  
+  sheet.setColumnWidth(9, 100);
+  sheet.setColumnWidth(10, 100);
+  sheet.setColumnWidth(11, 100);    
+  sheet.setColumnWidth(12, 100);
+  sheet.setColumnWidth(13, 100);
+  sheet.setColumnWidth(14, 100);  
+  
+  addHeaderToOutputSheet(sheet);
+  
+  return sheet;
+}
+
+function addOutputToSheet(output, sheet) {
+  sheet.insertRowsBefore(3, output.length); // add empty rows below header row
+
+  var startRow = 3;
+  
+  var range=sheet.getRange(startRow, 1, output.length, output[0].length) ;
+  range.setValues(output) ; 
+
+  Logger.log("\nNumber of rows added to output sheet: "+output.length+"\n\n");
+}
+
+function sendEmail(numberOfAlerts) {
+  if (SEND_EMAIL) {
+    // send the email
+    var emailBody = 
+        "Number of changes across all accounts: " + numberOfAlerts + "\n" + 
+        "See details: "+ SPREADSHEET_URL+ "\n" + EMAIL_BODY;
+
+    MailApp.sendEmail(EMAIL_ADDRESSES, EMAIL_SUBJECT, emailBody);
+    Logger.log("Sending alert mail");
+  }  
+}
+
+function alert(string) {
+  Logger.log("### "+string);
+}
