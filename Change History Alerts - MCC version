@@ -10,19 +10,13 @@
 
 // CHANGE SETTINGS HERE
 var SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1lC85X4sCO-eWU5aZ7Ws3WxbpC4WZMmzdFxsJ87maSGs/edit?gid=0#gid=0"; //insert a new blank spreadsheet url between the double quotes 
-var EMAIL_ADDRESSES = "robert.creutzburg@skydreams.nl"; //alert email addresses, insert your email addresses between the double quotes. You can add multiple email addresses between the double quotes, just separate them via a comma, ie: "john@doe.com, jane@doe.com"
+var EMAIL_ADDRESSES = "robert.creutzburg@skydreams.nl, theo.vanbeusichem@skydreams.nl, jeroen.snoek@skydreams.nl"; //alert email addresses, insert your email addresses between the double quotes. You can add multiple email addresses between the double quotes, just separate them via a comma
 
 var IGNORE_USERS = [
   'robert.creutzburg@skydreams.nl',
   'theo.vanbeusichem@skydreams.nl',
   'jeroen.snoek@skydreams.nl'
 ];
-// NOTE: if you want to add multiple users, add them between the square brackets, one per line, with a comma separating the lines. Ie:     
-//var IGNORE_USERS = [
-//      'john@doe.com',
-//      'jane@doe.com',
-//      'jill@johns.com'
-//    ];
 
 var SEND_EMAIL = true;
 var EMAIL_SUBJECT = "[GAds Script] - WARNING - Change by person outside of organisation";
@@ -33,7 +27,7 @@ var EMAIL_BODY =
     "This script checks changes in the 'Change history' :\n"+
     "\n"+
     "For all changes during "+PERIOD+" \n"+
-    "		check if there is a change being made by users other than "+IGNORE_USERS+" \n"+
+    "		check if there is a change being made by users other than: " + IGNORE_USERS.join(", ") + "\n"+
     "		if so, alerts are logged in Google Sheet: "+SPREADSHEET_URL+" \n"+
     "\n"+
     "If there is an alert an email is sent to:\n"+ EMAIL_ADDRESSES +"\n";
@@ -61,7 +55,7 @@ function main() {
       reportResults(changeAlerts);
       totalAlerts += changeAlerts.length;
     } else {
-      Logger.log("Could not find any changes in change history that were made by users other than "+IGNORE_USERS+" \n");
+      Logger.log("Could not find any changes in change history that were made by users other than "+IGNORE_USERS.join(", ")+" \n");
     }
   }
   
@@ -90,7 +84,7 @@ function getChangeAlerts() {
               "change_event.user_email " +
               "FROM change_event " +
               "WHERE change_event.change_date_time DURING "+PERIOD+" " + 
-              "AND change_event.user_email NOT IN ('"+IGNORE_USERS.join("', '")+"') "+
+              "AND change_event.user_email NOT IN ('" + IGNORE_USERS.join("','") + "') "+
               "ORDER BY change_event.change_date_time DESC "+ 
               "LIMIT 9999 "; // max of 10k changes reported per request
               
