@@ -1,0 +1,480 @@
+function main() {
+  // Edit your settings here. and put your gsheet url
+  // copy this sheet: https://docs.google.com/spreadsheets/d/1Fi8_4bLm1AJPtijdXaIfh_WY5abfGgCHME8JpyFUUkQ/copy
+  var sheetUrl = 'your_sheet_url_here'; // Replace with your Google Sheet URL
+  var sheetId = extractSheetIdFromUrl(sheetUrl);
+  var n = 1; // Set your desired N-gram value (e.g., 2 for bi-grams)
+  
+  // Fetch settings from the "Settings" tab
+  var settingsSheet = SpreadsheetApp.openByUrl(sheetUrl).getSheetByName("Settings");
+  var clickThreshold = settingsSheet.getRange("C3").getValue();
+  var pmaxEnabled = settingsSheet.getRange("C5").getValue().toString().toLowerCase() === 'true';
+  
+  // no changes after here
+  var last30Days = 'LAST_30_DAYS';
+  var preceding180Days = getPreceding180DaysRange();
+
+  // Fetch data for the last 30 days
+  var last30DaysData = fetchSearchTermsData(last30Days, clickThreshold);
+
+  // Fetch data for the preceding 180 days
+  var preceding180DaysData = fetchSearchTermsData(preceding180Days, clickThreshold);
+
+  // Get unique search terms from the preceding 180 days
+  var preceding180DaysQueries = new Set(preceding180DaysData.map(function(row) {
+    return row[2]; // Query is the first element in each row
+  }));
+
+  // Filter out the search terms that occurred in the preceding 180 days
+  var uniqueLast30DaysData = last30DaysData.filter(function(row) {
+    return !preceding180DaysQueries.has(row[2]);
+  });
+
+  // Collect all data for writing
+  var allData = {
+    'Last 30 Days Data': addMetrics(last30DaysData),
+    'Preceding 180 Days Data': addMetrics(preceding180DaysData),
+    '30 Days Data (new Search terms)': addMetrics(uniqueLast30DaysData)
+  };
+
+  // Only fetch and process PMAX data if enabled
+  if (pmaxEnabled) {
+    // Fetch PMax data for the last 30 days and preceding 180 days
+    var last30DaysPmaxData = fetchPmaxData("last_30_days", clickThreshold);
+    var preceding180DaysPmaxData = fetchPmaxData("preceding_180_days", clickThreshold);
+
+    // Get unique search terms from the preceding 180 days
+    var preceding180DaysPmaxQueries = new Set(preceding180DaysPmaxData.map(function(row) {
+      return row[3]; // Query is the first element in each row
+    }));
+
+    // Filter out the search terms that occurred in the preceding 180 days
+    var uniqueLast30DaysPmaxData = last30DaysPmaxData.filter(function(row) {
+      return !preceding180DaysPmaxQueries.has(row[3]);
+    });
+
+    // Add PMAX data to allData
+    allData['Last 30 Days Data (Pmax)'] = addPmaxMetrics(last30DaysPmaxData);
+    allData['Preceding 180 days data (Pmax)'] = addPmaxMetrics(preceding180DaysPmaxData);
+    allData['30 Days Data (new Search terms - Pmax)'] = addPmaxMetrics(uniqueLast30DaysPmaxData);
+  }
+
+  writeAllDataToSheet(sheetId, allData);
+  
+  performNGramAnalysis(sheetId, 'N-Gram Data (new Search terms)', uniqueLast30DaysData, n);
+  
+  if (pmaxEnabled) {
+    performNGramAnalysis(sheetId, 'N-Gram Data (new Search terms - Pmax)', uniqueLast30DaysPmaxData, n);
+  }
+}
+
+function addMetrics(data) {
+  return data.map(function(row) {
+    var cost = row[4];
+    var conversions = row[7];
+    var conversionValue = row[8];
+    var costPerConversion = conversions > 0 ? cost / conversions : 0;
+    var conversionValuePerCost = cost > 0 ? conversionValue / cost : 0;
+    return row.concat([costPerConversion, conversionValuePerCost]);
+  });
+}
+
+function addPmaxMetrics(data) {
+  return data.map(function(row) {
+    var impressions = row[2];
+    var clicks = row[3];
+    var conversions = row[4];
+    var conversionValue = row[5];
+    var costPerConversion = conversions > 0 ? conversionValue / conversions : 0;
+    var conversionValuePerCost = impressions > 0 ? conversionValue / impressions : 0;
+    return row.concat([costPerConversion, conversionValuePerCost]);
+  });
+}
+
+function extractSheetIdFromUrl(url) {
+  var matches = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (matches && matches[1]) {
+    return matches[1];
+  } else {
+    throw new Error('Invalid Google Sheet URL');
+  }
+}
+
+function getCampaignIds() {
+  var campaignIds = [];
+  var gaqlQuery = "SELECT campaign.id FROM campaign WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status = 'ENABLED'";
+  var results = AdsApp.search(gaqlQuery);
+  
+  while (results.hasNext()) {
+    var result = results.next();
+    campaignIds.push(result.campaign.id);
+  }  
+
+  return campaignIds;
+}
+
+function getCampaignNameById(campaignId) {
+  var gaqlQuery = "SELECT campaign.name FROM campaign WHERE campaign.id = '" + campaignId + "'";
+  var results = AdsApp.search(gaqlQuery);
+  
+  if (results.hasNext()) {
+    var result = results.next();
+    return result.campaign.name;
+  } else {
+    console.log("No campaign with id: " + campaignId);
+    return "";
+  }
+}
+
+function fetchSearchTermsData(dateRange, clickThreshold) {
+  var query = `
+    SELECT 
+      CampaignName,
+      AdGroupName,
+      Query, 
+      QueryMatchTypeWithVariant, 
+      Cost, 
+      Impressions, 
+      Clicks, 
+      Conversions, 
+      ConversionValue, 
+      CostPerConversion 
+    FROM 
+      SEARCH_QUERY_PERFORMANCE_REPORT 
+    WHERE 
+      Impressions > 0 AND Clicks >= ${clickThreshold}
+    DURING 
+      ${dateRange}
+  `;
+
+  var report = AdsApp.report(query);
+  var rows = report.rows();
+
+  var data = [];
+  while (rows.hasNext()) {
+    var row = rows.next();
+    data.push([
+      row['CampaignName'],
+      row['AdGroupName'],
+      row['Query'],
+      row['QueryMatchTypeWithVariant'],
+      parseFloat(row['Cost']),
+      parseInt(row['Impressions']),
+      parseInt(row['Clicks']),
+      parseFloat(row['Conversions']),
+      parseFloat(row['ConversionValue']),
+      parseFloat(row['CostPerConversion'])
+    ]);
+  }
+
+  return data;
+}
+
+function fetchPmaxData(period, clickThreshold) {
+  var campaignIds = getCampaignIds();
+  var allPmaxData = [];
+
+  for (var i = 0; i < campaignIds.length; i++) {
+    var campaignId = campaignIds[i];
+    var campaignName = getCampaignNameById(campaignId);
+    var searchCategoryStats = getSearchCategorieStats(campaignId, period, clickThreshold);
+
+    for (var category in searchCategoryStats) {
+      for (var subCategory in searchCategoryStats[category]) {
+        for (var searchTerm in searchCategoryStats[category][subCategory]) {
+          var stats = searchCategoryStats[category][subCategory][searchTerm];
+          allPmaxData.push([
+            campaignName,
+            category,
+            subCategory,
+            searchTerm,
+            stats.impressions,
+            stats.clicks,
+            stats.conversions,
+            stats.conversionValue
+          ]);
+        }
+      }
+    }
+  }
+
+  return allPmaxData;
+}
+
+function getSearchCategorieStats(campaignId, period, clickThreshold) {
+  var searchCategoryObject = {};
+  var periodString;
+  
+  switch(period) {
+    case "last_30_days":
+      periodString = " BETWEEN '" + dates(30) + "' AND '" + dates(1) + "'";
+      break;
+    case "preceding_180_days":
+      periodString = " BETWEEN '" + dates(210) + "' AND '" + dates(31) + "'";
+      break;
+    default:
+      Logger.log("### ERROR: Could not recognize the period");
+      return searchCategoryObject;
+  }
+
+  // First, get all campaign_search_term_insight.id for this campaign
+  var idQuery = "SELECT campaign_search_term_insight.id " +
+                "FROM campaign_search_term_insight " +
+                "WHERE campaign_search_term_insight.campaign_id = " + campaignId +
+                " AND segments.date " + periodString;
+
+  var idReport = AdsApp.search(idQuery);
+  
+  while (idReport.hasNext()) {
+    var idResult = idReport.next();
+    var insightId = idResult.campaignSearchTermInsight.id;
+
+    // For each insight ID, get the search terms and metrics
+    var termQuery = "SELECT campaign_search_term_insight.category_label, " +
+                    "segments.search_subcategory, " +
+                    "segments.search_term, " +
+                    "metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value " +
+                    "FROM campaign_search_term_insight " +
+                    "WHERE campaign_search_term_insight.id = '" + insightId + "'" +
+                    " AND campaign_search_term_insight.campaign_id = '" + campaignId + "'" +
+                    " AND segments.date " + periodString;
+
+    var termReport = AdsApp.search(termQuery);
+    
+    while (termReport.hasNext()) {
+      var termResult = termReport.next();
+      var category = termResult.campaignSearchTermInsight.categoryLabel;
+      var subCategory = termResult.segments.search_subcategory;
+      var searchTerm = termResult.segments.searchTerm;
+      var impressions = parseInt(termResult.metrics.impressions);
+      var clicks = parseInt(termResult.metrics.clicks);
+      var conversions = parseFloat(termResult.metrics.conversions);
+      var conversionValue = parseFloat(termResult.metrics.conversionsValue);
+      
+      // Apply click threshold filter in memory
+      if (clicks >= clickThreshold) {
+        if (!searchCategoryObject[category]) {
+          searchCategoryObject[category] = {};
+        }
+        if (!searchCategoryObject[category][subCategory]) {
+          searchCategoryObject[category][subCategory] = {};
+        }
+        if (!searchCategoryObject[category][subCategory][searchTerm]) {
+          searchCategoryObject[category][subCategory][searchTerm] = {
+            impressions: 0,
+            clicks: 0,
+            conversions: 0,
+            conversionValue: 0
+          };
+        }
+
+        searchCategoryObject[category][subCategory][searchTerm].impressions += impressions;
+        searchCategoryObject[category][subCategory][searchTerm].clicks += clicks;
+        searchCategoryObject[category][subCategory][searchTerm].conversions += conversions;
+        searchCategoryObject[category][subCategory][searchTerm].conversionValue += conversionValue;
+      }
+    }
+  }
+  
+  return searchCategoryObject;
+}
+
+function getPreceding180DaysRange() {
+  var today = new Date();
+  var startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 210);
+  var endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 31);
+
+  var start = Utilities.formatDate(startDate, AdsApp.currentAccount().getTimeZone(), 'yyyyMMdd');
+  var end = Utilities.formatDate(endDate, AdsApp.currentAccount().getTimeZone(), 'yyyyMMdd');
+
+  return `${start},${end}`;
+}
+
+function dates(x){ 
+  var MILLIS_PER_DAY = 1000 * 60 * 60 * 24;
+  var now = new Date();
+  var date = new Date(now.getTime() - x * MILLIS_PER_DAY);
+  var timeZone = AdsApp.currentAccount().getTimeZone();
+  var output = Utilities.formatDate(date, timeZone, 'yyyy-MM-dd');
+  return output;
+}
+
+function writeAllDataToSheet(sheetId, allData) {
+  try {
+    var spreadsheet = SpreadsheetApp.openById(sheetId);
+
+    for (var sheetName in allData) {
+      var data = allData[sheetName];
+      var sheet = getOrCreateSheet(spreadsheet, sheetName);
+      sheet.clear();
+
+      var headers;
+      if (sheetName.includes('Pmax')) {
+        headers = ['Campaign', 'Search Category', 'Search Subcategory', 'Search term', 'Impressions', 'Clicks', 'Conversions', 'Conversion Value'];
+      } else {
+        headers = ['Campaign Name', 'Ad Group Name', 'Search Term', 'Match Type', 'Cost', 'Impressions', 'Clicks', 'Conversions', 'Conversion Value', 'Cost / Conversion', 'Conv. Value / Cost'];
+      }
+
+      var values = [headers];
+      
+      for (var i = 0; i < data.length; i++) {
+        var row = data[i];
+        if (row.length < headers.length) {
+          // If the row has fewer columns than headers, pad with empty strings
+          while (row.length < headers.length) {
+            row.push("");
+          }
+        } else if (row.length > headers.length) {
+          // If the row has more columns than headers, truncate
+          row = row.slice(0, headers.length);
+        }
+        values.push(row);
+        
+        // Add logging for Pmax data
+        if (sheetName.includes('Pmax')) {
+          //Logger.log('Pmax row ' + i + ': ' + JSON.stringify(row));
+        }
+      }
+
+      sheet.getRange(1, 1, values.length, headers.length).setValues(values);
+    }
+  } catch (error) {
+    Logger.log('Error writing to sheet: ' + error.message);
+  }
+}
+
+function getOrCreateSheet(spreadsheet, sheetName) {
+  var sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+  return sheet;
+}
+
+function performNGramAnalysis(sheetId, sheetName, data, n) {
+  Logger.log('Performing N-Gram analysis for sheet: ' + sheetName);
+  Logger.log('Data length: ' + (data ? data.length : 'undefined'));
+  
+  var spreadsheet = SpreadsheetApp.openById(sheetId);
+  var sheet = getOrCreateSheet(spreadsheet, sheetName);
+  sheet.clear();
+
+  // Determine the header based on the sheet name
+  var headers;
+  if (sheetName.includes('Pmax')) {
+    headers = ['N-Gram', 'Impressions', 'Clicks', 'Conversions', 'Conversion Value'];
+  } else {
+    headers = ['N-Gram', 'Cost', 'Impressions', 'Clicks', 'Conversions', 'Conversion Value', 'Cost / Conv'];
+  }
+
+  // Write the header row
+  sheet.appendRow(headers);
+
+  // Perform the N-Gram analysis
+  if (sheetName.includes('Pmax')) {
+    performPmaxNGramAnalysis(sheet, data, n);
+  } else {
+    performRegularNGramAnalysis(sheet, data, n);
+  }
+}
+
+function performRegularNGramAnalysis(sheet, data, n) {
+  // Build a dictionary of N-Grams and their associated metrics
+  var nGramData = {};
+  for (var i = 0; i < data.length; i++) {
+    var query = data[i][2];
+    var impressions = data[i][5];
+    var clicks = data[i][6];
+    var conversions = data[i][7];
+    var conversionValue = data[i][8];
+    var cost = data[i][4];
+
+    // Split query into words
+    var words = query.split(/\s+/);
+
+    // Generate N-grams
+    for (var j = 0; j <= words.length - n; j++) {
+      var nGram = words.slice(j, j + n).join(' ');
+
+      if (!nGramData[nGram]) {
+        nGramData[nGram] = { impressions: 0, clicks: 0, conversions: 0, conversionValue: 0, cost: 0, costPerConversion: 0 };
+      }
+
+      nGramData[nGram].impressions += impressions;
+      nGramData[nGram].clicks += clicks;
+      nGramData[nGram].conversions += conversions;
+      nGramData[nGram].conversionValue += conversionValue;
+      nGramData[nGram].cost += cost;
+      nGramData[nGram].costPerConversion = nGramData[nGram].conversions ? (nGramData[nGram].cost / nGramData[nGram].conversions) : 0;
+    }
+  }
+
+  // Write N-gram data to sheet
+  var values = [];
+  for (var nGram in nGramData) {
+    var record = nGramData[nGram];
+    values.push([nGram, record.cost, record.impressions, record.clicks, record.conversions, record.conversionValue, record.costPerConversion]);
+  }
+  sheet.getRange(2, 1, values.length, values[0].length).setValues(values);
+}
+
+function performPmaxNGramAnalysis(sheet, data, n) {
+  // Add error checking
+  if (!data || !Array.isArray(data) || data.length === 0) {
+    Logger.log('Error: Invalid or empty data passed to performPmaxNGramAnalysis');
+    return;
+  }
+
+  // Build a dictionary of N-Grams and their associated metrics
+  var nGramData = {};
+  for (var i = 0; i < data.length; i++) {
+    // Add error checking for each row
+    if (!data[i] || !Array.isArray(data[i]) || data[i].length < 6) {
+      Logger.log('Error: Invalid data row at index ' + i + ' in performPmaxNGramAnalysis');
+      continue;
+    }
+
+    var query = data[i][3];
+    var impressions = data[i][4];
+    var clicks = data[i][5];
+    var conversions = data[i][6];
+    var conversionValue = data[i][7];
+
+    // Check if query is a string
+    if (typeof query !== 'string') {
+      Logger.log('Error: Invalid query at index ' + i + ' in performPmaxNGramAnalysis');
+      continue;
+    }
+
+    // Split query into words
+    var words = query.split(/\s+/);
+
+    // Generate N-grams
+    for (var j = 0; j <= words.length - n; j++) {
+      var nGram = words.slice(j, j + n).join(' ');
+
+      if (!nGramData[nGram]) {
+        nGramData[nGram] = { impressions: 0, clicks: 0, conversions: 0, conversionValue: 0 };
+      }
+
+      nGramData[nGram].impressions += impressions;
+      nGramData[nGram].clicks += clicks;
+      nGramData[nGram].conversions += conversions;
+      nGramData[nGram].conversionValue += conversionValue;
+    }
+  }
+
+  // Write N-gram data to sheet
+  var values = [];
+  for (var nGram in nGramData) {
+    var record = nGramData[nGram];
+    values.push([nGram, record.impressions, record.clicks, record.conversions, record.conversionValue]);
+  }
+
+  // Add error checking before writing to sheet
+  if (values.length > 0) {
+    sheet.getRange(2, 1, values.length, values[0].length).setValues(values);
+  } else {
+    Logger.log('Warning: No N-gram data to write to sheet in performPmaxNGramAnalysis');
+  }
+}
