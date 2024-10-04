@@ -1,0 +1,176 @@
+/**
+ * Google Ads Sitelink Manager Script
+ * 
+ * Purpose:
+ * This script automates the process of managing sitelinks in Google Ads accounts. It performs two main functions:
+ * 1. Reporting: It generates a comprehensive report of all sitelinks at the account, campaign, and ad group levels.
+ * 2. Updating: It allows for bulk updates of sitelinks based on information provided in a Google Sheet.
+ * 
+ * Functionality:
+ * 1. Reporting:
+ *    - The script connects to a specified Google Sheet.
+ *    - It creates (or clears) a sheet named 'Sitelinks Report'.
+ *    - It then fetches all sitelinks from the Google Ads account and writes their details to the sheet.
+ *    - Information captured includes: Level (Account/Campaign/Ad Group), ID, Parent ID, Sitelink Text, 
+ *      Descriptions, Final URL, Mobile Final URL, and Tracking Template.
+ * 
+ * 2. Updating:
+ *    - After reporting, the script checks the 'Update' column in the sheet.
+ *    - For any row where 'Update' is set to 'Yes', the script will attempt to update that sitelink in Google Ads.
+ *    - It uses the information in the row to update the sitelink's text, descriptions, URLs, and tracking template.
+ *    - After a successful update, it changes the 'Update' value back to 'No'.
+ * 
+ * How to use:
+ * 1. Replace 'YOUR_SPREADSHEET_URL_HERE' with the URL of your Google Sheet.
+ * 2. Run the script to generate the initial report.
+ * 3. To update sitelinks:
+ *    - Modify the desired fields in the sheet (e.g., Sitelink Text, Description 1, Final URL, etc.)
+ *    - Set the 'Update' column to 'Yes' for the rows you want to update.
+ *    - Run the script again. It will process all rows marked 'Yes' for updating.
+ * 
+ * Note: 
+ * - Ensure you have the necessary permissions to access both the Google Ads account and the Google Sheet.
+ * - Changes may take some time to reflect in the Google Ads interface after running the script.
+ * - Always verify the updates in your Google Ads account to ensure they've been applied correctly.
+ */
+
+function main() {
+  try {
+    const spreadsheetUrl = 'https://docs.google.com/spreadsheets/d/1XFZjOaij7YDwvU_cLcZx_wkzXCmeK5Oe9vQvptYSrhM/edit?gid=1831829712#gid=1831829712'; // Vervang dit door je eigen URL
+    const spreadsheet = SpreadsheetApp.openByUrl(spreadsheetUrl);
+    const sheet = spreadsheet.getSheetByName('Sitelinks Report') || spreadsheet.insertSheet('Sitelinks Report');
+    
+    // Clear bestaande inhoud van het sheet
+    sheet.clear();
+    sheet.appendRow(['Level', 'ID', 'Parent ID', 'Sitelink Text', 'Description 1', 'Description 2', 'Final URL', 'Mobile Final URL', 'Tracking Template', 'Update']);
+
+    // Rapporteer account, campagne en advertentiegroep sitelinks
+    reportAccountSitelinks(sheet);
+    reportCampaignSitelinks(sheet);
+    reportAdGroupSitelinks(sheet);
+
+    // Verwerk updates vanuit het sheet
+    processUpdates(sheet);
+
+    Logger.log('Sitelink rapport gegenereerd en updates verwerkt.');
+  } catch (e) {
+    Logger.log('Er is een fout opgetreden tijdens de uitvoering van het script: ' + e);
+  }
+}
+
+function reportAccountSitelinks(sheet) {
+  const accountSitelinks = AdsApp.extensions().sitelinks().get();
+  let count = 0;
+  while (accountSitelinks.hasNext()) {
+    const sitelink = accountSitelinks.next();
+    appendSitelinkRow(sheet, 'Account', AdsApp.currentAccount().getCustomerId(), null, sitelink);
+    count++;
+  }
+  Logger.log(count + ' account-niveau sitelinks verwerkt.');
+}
+
+function reportCampaignSitelinks(sheet) {
+  const campaigns = AdsApp.campaigns().withCondition("Status = ENABLED").get();
+  let count = 0;
+  while (campaigns.hasNext()) {
+    const campaign = campaigns.next();
+    const campaignSitelinks = campaign.extensions().sitelinks().get();
+    while (campaignSitelinks.hasNext()) {
+      const sitelink = campaignSitelinks.next();
+      appendSitelinkRow(sheet, 'Campaign', sitelink.getId(), campaign.getId(), sitelink);
+      count++;
+    }
+  }
+  Logger.log(count + ' campagne-niveau sitelinks verwerkt.');
+}
+
+function reportAdGroupSitelinks(sheet) {
+  const adGroups = AdsApp.adGroups().withCondition("Status = ENABLED").get();
+  let count = 0;
+  while (adGroups.hasNext()) {
+    const adGroup = adGroups.next();
+    const adGroupSitelinks = adGroup.extensions().sitelinks().get();
+    while (adGroupSitelinks.hasNext()) {
+      const sitelink = adGroupSitelinks.next();
+      appendSitelinkRow(sheet, 'Ad Group', sitelink.getId(), adGroup.getId(), sitelink);
+      count++;
+    }
+  }
+  Logger.log(count + ' advertentiegroep-niveau sitelinks verwerkt.');
+}
+
+function appendSitelinkRow(sheet, level, id, parentId, sitelink) {
+  const finalUrl = sitelink.urls().getFinalUrl() || 'N/A';
+  const mobileFinalUrl = sitelink.urls().getMobileFinalUrl() || 'N/A';
+  const trackingTemplate = sitelink.urls().getTrackingTemplate() || 'N/A';
+
+  sheet.appendRow([
+    level,
+    id,
+    parentId || 'N/A',
+    sitelink.getLinkText(),
+    sitelink.getDescription1(),
+    sitelink.getDescription2(),
+    finalUrl,
+    mobileFinalUrl,
+    trackingTemplate,
+    'No'  // Initiële waarde voor de Update kolom
+  ]);
+}
+
+function processUpdates(sheet) {
+  const data = sheet.getDataRange().getValues();
+  
+  // Loop door rijen, sla de header over
+  for (let i = 1; i < data.length; i++) {
+    const level = data[i][0];
+    const id = data[i][1];
+    const parentId = data[i][2];
+    const sitelinkText = data[i][3];
+    const description1 = data[i][4];
+    const description2 = data[i][5];
+    const finalUrl = data[i][6];
+    const mobileFinalUrl = data[i][7];
+    const trackingTemplate = data[i][8];
+    const updateRequired = data[i][9];
+
+    if (updateRequired === 'Yes') {
+      Logger.log('Sitelink met ID ' + id + ' wordt bijgewerkt.');
+      updateSitelink(level, id, parentId, sitelinkText, description1, description2, finalUrl, mobileFinalUrl, trackingTemplate);
+
+      // Markeer de "Update" kolom als "No" na de update
+      sheet.getRange(i + 1, 10).setValue('No');
+    }
+  }
+}
+
+function updateSitelink(level, id, parentId, sitelinkText, description1, description2, finalUrl, mobileFinalUrl, trackingTemplate) {
+  let sitelinkIterator;
+  
+  if (level === 'Account') {
+    sitelinkIterator = AdsApp.extensions().sitelinks().withIds([id]).get();
+  } else if (level === 'Campaign') {
+    const campaign = AdsApp.campaigns().withIds([parentId]).get().next();
+    sitelinkIterator = campaign.extensions().sitelinks().withIds([id]).get();
+  } else if (level === 'Ad Group') {
+    const adGroup = AdsApp.adGroups().withIds([parentId]).get().next();
+    sitelinkIterator = adGroup.extensions().sitelinks().withIds([id]).get();
+  }
+
+  if (sitelinkIterator.hasNext()) {
+    const sitelink = sitelinkIterator.next();
+    
+    sitelink.setLinkText(sitelinkText);
+    sitelink.setDescription1(description1);
+    sitelink.setDescription2(description2);
+    
+    const urls = sitelink.urls();
+    if (finalUrl !== 'N/A') urls.setFinalUrl(finalUrl);
+    if (mobileFinalUrl !== 'N/A') urls.setMobileFinalUrl(mobileFinalUrl);
+    if (trackingTemplate !== 'N/A') urls.setTrackingTemplate(trackingTemplate);
+
+    Logger.log('Sitelink succesvol bijgewerkt: ' + id);
+  } else {
+    Logger.log('Sitelink met ID ' + id + ' niet gevonden.');
+  }
+}
