@@ -2,13 +2,12 @@
  * MCC Level Weekly Comparison Google Ads Script
  * 
  * This script generates a report comparing the performance of campaigns
- * across all accessible accounts in the MCC for last week (Monday to Sunday)
- * versus the week before that. It excludes specific campaigns and highlights
- * top performers based on conversions.
+ * for specified accounts in the MCC for last week (Monday to Sunday)
+ * versus the week before that.
  * 
- * Version: 6.0
+ * Version: 6.2
  * Created: 2024-08-21
- * Updated: 2024-08-21
+ * Updated: 2024-10-25
  */
 
 var CONFIG = {
@@ -23,32 +22,53 @@ var CONFIG = {
 
 function main() {
   Logger.log("Script started");
-  var accountIterator = AdsManagerApp.accounts().get();
+  
+  // List of specific accounts to process
+  var targetAccounts = [
+    '762-621-8614',
+    '436-717-6100',
+    '554-176-2304',
+    '751-134-7208',
+    '160-381-4612',
+    '191-908-2512',
+    '960-092-3540',
+    '566-301-2455',
+    '182-825-0816'
+  ];
+
   var processedAccounts = 0;
   var failedAccounts = 0;
   var errorLog = [];
 
-  while (accountIterator.hasNext()) {
-    var account = accountIterator.next();
-    var accountId = account.getCustomerId();
+  // Process only the specified accounts
+  targetAccounts.forEach(function(accountId) {
     Logger.log("Attempting to process account: " + accountId);
-
-    try {
-      var result = processAccountSafely(account);
-      if (result.success) {
-        processedAccounts++;
-        Logger.log("Successfully processed account: " + accountId);
-      } else {
+    
+    var accountSelector = AdsManagerApp.accounts().withIds([accountId]);
+    
+    if (accountSelector.get().hasNext()) {
+      var account = accountSelector.get().next();
+      try {
+        var result = processAccountSafely(account);
+        if (result.success) {
+          processedAccounts++;
+          Logger.log("Successfully processed account: " + accountId);
+        } else {
+          failedAccounts++;
+          errorLog.push("Failed to process account " + accountId + ": " + result.error);
+          Logger.log("Failed to process account " + accountId + ": " + result.error);
+        }
+      } catch (e) {
         failedAccounts++;
-        errorLog.push("Failed to process account " + accountId + ": " + result.error);
-        Logger.log("Failed to process account " + accountId + ": " + result.error);
+        errorLog.push("Unexpected error processing account " + accountId + ": " + e.message);
+        Logger.log("Unexpected error processing account " + accountId + ": " + e.message);
       }
-    } catch (e) {
+    } else {
       failedAccounts++;
-      errorLog.push("Unexpected error processing account " + accountId + ": " + e.message);
-      Logger.log("Unexpected error processing account " + accountId + ": " + e.message);
+      errorLog.push("Account not found or not accessible: " + accountId);
+      Logger.log("Account not found or not accessible: " + accountId);
     }
-  }
+  });
 
   sendSummaryEmail(processedAccounts, failedAccounts, errorLog);
   Logger.log("Script completed");
@@ -139,8 +159,16 @@ function buildGAQLQuery(startDate, endDate) {
     FROM campaign 
     WHERE 
       campaign.status = 'ENABLED' AND 
+      metrics.clicks >= 1 AND
       segments.date BETWEEN '${startDate}' AND '${endDate}'
   `;
+}
+
+function isExcludedCampaign(campaignName) {
+  if (!campaignName) return false;
+  return CONFIG.EXCLUDED_CAMPAIGN_KEYWORDS.some(keyword => 
+    campaignName.toLowerCase().includes(keyword.toLowerCase())
+  );
 }
 
 function runGAQLQuery(query) {
@@ -151,25 +179,22 @@ function runGAQLQuery(query) {
   while (report.hasNext()) {
     var row = report.next();
     if (!isExcludedCampaign(row.campaign.name)) {
+      var cost = row.metrics.costMicros / 1000000;
+      var conversionValue = row.metrics.conversionsValue;
       results.push({
         name: row.campaign.name,
         impressions: row.metrics.impressions,
         clicks: row.metrics.clicks,
-        cost: row.metrics.costMicros / 1000000,
+        cost: cost,
         conversions: row.metrics.conversions,
-        conversionValue: row.metrics.conversionsValue
+        conversionValue: conversionValue,
+        margin: conversionValue - cost
       });
     }
   }
 
   Logger.log("Query returned " + results.length + " results");
   return results;
-}
-
-function isExcludedCampaign(campaignName) {
-  return CONFIG.EXCLUDED_CAMPAIGN_KEYWORDS.some(keyword => 
-    campaignName.toLowerCase().includes(keyword.toLowerCase())
-  );
 }
 
 function createEmailBody(reportData, accountName, customerId) {
@@ -188,12 +213,13 @@ function createEmailBody(reportData, accountName, customerId) {
     '<th>Cost</th>' +
     '<th>Conversions</th>' +
     '<th>Conv. Value</th>' +
+    '<th>Margin</th>' +
     '<th>Performance</th>' +
     '</tr>';
 
   reportData.thisWeek.forEach(function(thisWeekCampaign, index) {
     var lastWeekCampaign = reportData.lastWeek.find(c => c.name === thisWeekCampaign.name) || 
-      {impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionValue: 0};
+      {impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionValue: 0, margin: 0};
     
     var rowColor = CONFIG.COLOR_PALETTE[index % CONFIG.COLOR_PALETTE.length];
     var performanceEmoji = getPerformanceEmoji(thisWeekCampaign, lastWeekCampaign);
@@ -205,6 +231,7 @@ function createEmailBody(reportData, accountName, customerId) {
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.cost, lastWeekCampaign.cost, true) + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.conversions, lastWeekCampaign.conversions) + '</td>' +
       '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.conversionValue, lastWeekCampaign.conversionValue, true) + '</td>' +
+      '<td style="text-align: right;">' + formatComparison(thisWeekCampaign.margin, lastWeekCampaign.margin, true) + '</td>' +
       '<td style="text-align: center; font-size: 24px;">' + performanceEmoji + '</td>' +
       '</tr>';
   });
@@ -254,11 +281,11 @@ function getPerformanceEmoji(current, previous) {
   var metrics = ['impressions', 'clicks', 'conversions', 'conversionValue'];
   var improvements = metrics.filter(metric => current[metric] > previous[metric]).length;
   
-  if (improvements === 4) return CONFIG.PERFORMANCE_EMOJIS[0]; // 🔥 Excellent
-  if (improvements === 3) return CONFIG.PERFORMANCE_EMOJIS[1]; // 👍 Good
-  if (improvements === 2) return CONFIG.PERFORMANCE_EMOJIS[2]; // 😐 Average
-  if (improvements === 1) return CONFIG.PERFORMANCE_EMOJIS[3]; // 👎 Below Average
-  return CONFIG.PERFORMANCE_EMOJIS[4]; // 🆘 Poor
+  if (improvements === 4) return CONFIG.PERFORMANCE_EMOJIS[0];
+  if (improvements === 3) return CONFIG.PERFORMANCE_EMOJIS[1];
+  if (improvements === 2) return CONFIG.PERFORMANCE_EMOJIS[2];
+  if (improvements === 1) return CONFIG.PERFORMANCE_EMOJIS[3];
+  return CONFIG.PERFORMANCE_EMOJIS[4];
 }
 
 function createEmojiLegend() {
@@ -266,11 +293,11 @@ function createEmojiLegend() {
   html += '<h4 style="color: #4A4A4A; text-align: center;">Emoji Legend</h4>';
   html += '<table style="margin: auto; border-collapse: collapse;">';
   html += '<tr><th style="text-align: left; padding: 5px;">Emoji</th><th style="text-align: left; padding: 5px;">Meaning</th></tr>';
-  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[4] + '</td><td>Excellent (All metrics improved)</td></tr>';
-  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[3] + '</td><td>Good (Most metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[0] + '</td><td>Excellent (All metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[1] + '</td><td>Good (Most metrics improved)</td></tr>';
   html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[2] + '</td><td>Average (Some metrics improved)</td></tr>';
-  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[1] + '</td><td>Below Average (Few metrics improved)</td></tr>';
-  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[0] + '</td><td>Poor (No metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[3] + '</td><td>Below Average (Few metrics improved)</td></tr>';
+  html += '<tr><td style="padding: 5px;">' + CONFIG.PERFORMANCE_EMOJIS[4] + '</td><td>Poor (No metrics improved)</td></tr>';
   html += '</table>';
   html += '</div>';
   return html;
@@ -289,10 +316,32 @@ function sendEmail(emailBody, accountId) {
 
 function sendSummaryEmail(processedAccounts, failedAccounts, errorLog) {
   var subject = "MCC Weekly Report Summary";
-  var body = `Processed accounts: ${processedAccounts}\n` +
-             `Failed accounts: ${failedAccounts}\n\n` +
-             `Error Log:\n${errorLog.join('\n')}`;
-  
-  MailApp.sendEmail(CONFIG.EMAIL_RECIPIENT, subject, body);
+  var body = [
+    "📊 MCC Weekly Report Execution Summary",
+    "----------------------------------------",
+    `✅ Successfully processed accounts: ${processedAccounts}`,
+    `❌ Failed accounts: ${failedAccounts}`,
+    "",
+    "📝 Detailed Error Log:",
+    "----------------------------------------"
+  ];
+
+  if (errorLog.length > 0) {
+    errorLog.forEach(error => body.push("• " + error));
+  } else {
+    body.push("No errors reported");
+  }
+
+  body.push(
+    "",
+    "----------------------------------------",
+    "Script execution completed at: " + new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' })
+  );
+
+  MailApp.sendEmail({
+    to: CONFIG.EMAIL_RECIPIENT,
+    subject: subject,
+    body: body.join("\n")
+  });
   Logger.log("Summary email sent");
 }
