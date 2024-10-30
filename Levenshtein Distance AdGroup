@@ -1,0 +1,528 @@
+
+/**
+ * Google Ads Zoekterm Optimalisatie Script met Review Systeem
+ */
+const CONFIG = {
+  spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/1TOpzbvcNPEWVNkRklR8Fmyi6bJKQgdX0LYRGOU4jAzg/edit?gid=0#gid=0',
+  emailAddresses: ['robert.creutzburg@skydreams.nl'],
+  excludedCampaigns: ['DSA', 'Branded'],
+  minimumChangesForAlert: 5,
+  minimumDistance: 4,
+  minimumImpressions: 100,
+  minimumClicks: 10,
+  significantDifference: {   
+    ctr: 0.10,
+    cpc: 0.20,
+    convRate: 0.15
+  }
+};
+
+function setupSpreadsheet() {
+ const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.spreadsheetUrl);
+ 
+ // Maak eerst de benodigde sheets aan
+ if (!spreadsheet.getSheetByName('Uitgevoerde Uitsluitingen')) {
+   // Als Sheet1 bestaat, hernoem deze naar Uitgevoerde Uitsluitingen
+   const sheet1 = spreadsheet.getSheetByName('Sheet1');
+   if (sheet1) {
+     sheet1.setName('Uitgevoerde Uitsluitingen');
+   } else {
+     spreadsheet.insertSheet('Uitgevoerde Uitsluitingen');
+   }
+ }
+}
+
+function main() {
+  setupSpreadsheet();
+  const results = processSearchTerms();
+  createTrendComparisonSheet(results.significantChanges);
+  createReviewSheet(results.reviewNeeded);
+  sendEmailReport(results);
+}
+
+function levenshtein(a, b) {
+  let tmp = [];
+  if (a.length === 0) { return b.length; }
+  if (b.length === 0) { return a.length; }
+  if (a.length > b.length) { 
+    tmp = a; 
+    a = b; 
+    b = tmp; 
+  }
+  
+  const row = [];
+  for (let i = 0; i <= a.length; i++) {
+    row[i] = i;
+  }
+  
+  for (let i = 1; i <= b.length; i++) {
+    let prev = i;
+    for (let j = 1; j <= a.length; j++) {
+      const val = (b[i - 1] === a[j - 1]) ? 
+        row[j - 1] : 
+        Math.min(row[j - 1] + 1, Math.min(prev + 1, row[j] + 1));
+      row[j - 1] = prev;
+      prev = val;
+    }
+    row[a.length] = prev;
+  }
+  return row[a.length];
+}
+
+function evaluateDistance(distance1, distance2, query, adGroup1, adGroup2) {
+  function containsKeyword(searchQuery, adGroupName) {
+    // Verwijder veelvoorkomende woorden die niet relevant zijn voor matching
+    const stopWords = ['vacature', 'gezocht', 'werk', 'job', 'jobs'];
+    const searchWords = searchQuery.toLowerCase()
+      .split(' ')
+      .filter(word => !stopWords.includes(word));
+    
+    const adGroupName_clean = adGroupName.toLowerCase()
+      .replace(/[0-9]+\.\s*/g, ''); // Verwijder numerieke prefixes zoals "03. "
+    const adGroupWords = adGroupName_clean.split(' ');
+    
+    // Check voor matches met basis woorden
+    return searchWords.some(searchWord => {
+      if (searchWord.length < 3) return false;
+      
+      // Check directe matches
+      if (adGroupWords.includes(searchWord)) return true;
+      
+      // Check voor delen van woorden
+      return adGroupWords.some(adWord => {
+        // Speciale checks voor veel voorkomende woorden
+        if ((searchWord.includes('tuin') && adWord.includes('tuin')) ||
+            (searchWord.includes('klus') && adWord.includes('klus')) ||
+            (searchWord.includes('bobex') && adWord.includes('bobex'))) {
+          return true;
+        }
+        
+        // Algemene check voor woorddelen (minimaal 4 karakters)
+        return searchWord.length >= 4 && (
+          adWord.includes(searchWord) || searchWord.includes(adWord)
+        );
+      });
+    });
+  }
+
+  // Check matches in beide advertentiegroepen
+  const matchesAdGroup1 = containsKeyword(query, adGroup1);
+  const matchesAdGroup2 = containsKeyword(query, adGroup2);
+
+  // Als match in één groep, meteen uitsluiten in de andere
+  if (matchesAdGroup1 && !matchesAdGroup2) {
+    return {
+      isSignificant: true,
+      recommendedAction: adGroup2,
+      reason: `Match gevonden in ${adGroup1}`
+    };
+  }
+  
+  if (matchesAdGroup2 && !matchesAdGroup1) {
+    return {
+      isSignificant: true,
+      recommendedAction: adGroup1,
+      reason: `Match gevonden in ${adGroup2}`
+    };
+  }
+
+  // Als geen matches in beide groepen
+  if (!matchesAdGroup1 && !matchesAdGroup2) {
+    return {
+      isSignificant: false,
+      recommendedAction: null,
+      reason: `Zoekterm komt in geen van beide advertentiegroepen voor`
+    };
+  }
+
+  // Als matches in beide groepen, gebruik Levenshtein
+  const absoluteDifference = Math.abs(distance1 - distance2);
+  const isSignificant = absoluteDifference >= CONFIG.minimumDistance;
+
+  return {
+    isSignificant: isSignificant,
+    recommendedAction: distance1 > distance2 ? adGroup1 : adGroup2,
+    reason: !isSignificant
+      ? `Te klein verschil (${absoluteDifference} < ${CONFIG.minimumDistance})`
+      : 'Significant verschil'
+  };
+}
+
+function processSearchTerms() {
+  const report = AdsApp.report(`
+    SELECT 
+      Query, 
+      AdGroupId, 
+      AdGroupName, 
+      CampaignName,
+      Impressions,
+      Clicks,
+      Cost,
+      Conversions,
+      CostPerConversion,
+      ConversionRate
+    FROM 
+      SEARCH_QUERY_PERFORMANCE_REPORT
+    WHERE 
+      Impressions > 0
+    DURING LAST_7_DAYS
+  `);
+  
+  const rows = report.rows();
+  const searchTermData = {};
+  const significantChanges = [];
+  const reviewNeeded = [];
+  
+  while (rows.hasNext()) {
+    const row = rows.next();
+    const query = row['Query'];
+    const adGroupId = row['AdGroupId'];
+    const adGroupName = row['AdGroupName'];
+    const campaignName = row['CampaignName'];
+    
+    if (CONFIG.excludedCampaigns.includes(campaignName)) {
+      continue;
+    }
+    
+    if (!searchTermData[query]) {
+      searchTermData[query] = [];
+    }
+    
+    searchTermData[query].push({
+      adGroupId: adGroupId,
+      adGroupName: adGroupName,
+      campaignName: campaignName,
+      performance: {
+        impressions: parseInt(row['Impressions']) || 0,
+        clicks: parseInt(row['Clicks']) || 0,
+        cost: parseFloat(row['Cost']) || 0,
+        conversions: parseFloat(row['Conversions']) || 0,
+        costPerConversion: parseFloat(row['CostPerConversion']) || 0,
+        conversionRate: parseFloat(row['ConversionRate']) || 0
+      }
+    });
+  }
+
+  const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.spreadsheetUrl);
+  const sheet = spreadsheet.getSheetByName('Uitgevoerde Uitsluitingen') || spreadsheet.insertSheet('Uitgevoerde Uitsluitingen');
+  sheet.clear();
+  sheet.appendRow([
+    'Search Term',
+    'AdGroup 1',
+    'AdGroup 2',
+    'Levenshtein Distance 1',
+    'Levenshtein Distance 2',
+    'Uitgesloten Van',
+    'Reden'
+  ]);
+
+  for (const query in searchTermData) {
+    if (searchTermData[query].length > 1) {
+      const adGroup1 = searchTermData[query][0];
+      const adGroup2 = searchTermData[query][1];
+      
+      if (adGroup1.adGroupName !== adGroup2.adGroupName) {
+        const distance1 = levenshtein(adGroup1.adGroupName, query);
+        const distance2 = levenshtein(adGroup2.adGroupName, query);
+        
+        const evaluation = evaluateDistance(
+          distance1, 
+          distance2, 
+          query, 
+          adGroup1.adGroupName, 
+          adGroup2.adGroupName
+        );
+
+        if (evaluation.isSignificant) {
+          const excludedAdGroup = evaluation.recommendedAction;
+          const excludedAdGroupId = excludedAdGroup === adGroup1.adGroupName ? adGroup1.adGroupId : adGroup2.adGroupId;
+          
+          excludeSearchTerm(excludedAdGroupId, query);
+          
+          significantChanges.push({
+            searchTerm: query,
+            adGroup1: adGroup1,
+            adGroup2: adGroup2,
+            distance1: distance1,
+            distance2: distance2,
+            excludedFrom: excludedAdGroup,
+            adGroup1Data: adGroup1.performance,
+            adGroup2Data: adGroup2.performance
+          });
+
+          sheet.appendRow([
+            query,
+            adGroup1.adGroupName,
+            adGroup2.adGroupName,
+            distance1,
+            distance2,
+            excludedAdGroup,
+            evaluation.reason
+          ]);
+        } else {
+          reviewNeeded.push({
+            searchTerm: query,
+            adGroup1: adGroup1,
+            adGroup2: adGroup2,
+            distance1: distance1,
+            distance2: distance2,
+            reason: evaluation.reason,
+            suggestedAction: evaluation.recommendedAction,
+            adGroup1Data: adGroup1.performance,
+            adGroup2Data: adGroup2.performance
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    significantChanges: significantChanges,
+    reviewNeeded: reviewNeeded
+  };
+}
+
+function createReviewSheet(reviewCases) {
+  const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.spreadsheetUrl);
+  const reviewSheet = spreadsheet.getSheetByName('Review Nodig') || spreadsheet.insertSheet('Review Nodig');
+  reviewSheet.clear();
+
+  reviewSheet.appendRow([
+    'Zoekterm',
+    'Advertentiegroep 1',
+    'Advertentiegroep 2',
+    'Distance 1',
+    'Distance 2',
+    'Reden voor Review',
+    'CTR AdGroup 1',
+    'CTR AdGroup 2',
+    'Voorgestelde Actie',
+    'Opmerkingen'
+  ]);
+
+  reviewCases.forEach(caseItem => {
+    const ctr1 = (caseItem.adGroup1Data.clicks / caseItem.adGroup1Data.impressions * 100).toFixed(2);
+    const ctr2 = (caseItem.adGroup2Data.clicks / caseItem.adGroup2Data.impressions * 100).toFixed(2);
+
+    reviewSheet.appendRow([
+      caseItem.searchTerm,
+      caseItem.adGroup1.adGroupName,
+      caseItem.adGroup2.adGroupName,
+      caseItem.distance1,
+      caseItem.distance2,
+      caseItem.reason,
+      `${ctr1}%`,
+      `${ctr2}%`,
+      caseItem.suggestedAction || 'Handmatige review nodig',
+      ''
+    ]);
+  });
+
+  const lastRow = reviewSheet.getLastRow();
+  const range = reviewSheet.getRange(1, 1, lastRow, reviewSheet.getLastColumn());
+  range.setWrapStrategy(SpreadsheetApp.WrapStrategy.WRAP);
+  reviewSheet.getRange(1, 1, 1, reviewSheet.getLastColumn()).setBackground('#4285f4').setFontColor('white').setFontWeight('bold');
+  reviewSheet.autoResizeColumns(1, reviewSheet.getLastColumn());
+}
+
+function createTrendComparisonSheet(changes) {
+  const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.spreadsheetUrl);
+  const trendSheet = spreadsheet.getSheetByName('Trend Vergelijking') || spreadsheet.insertSheet('Trend Vergelijking');
+  trendSheet.clear();
+  
+  trendSheet.appendRow([
+    'Advertentiegroep', 
+    'Deze Week', 
+    'Vorige Week',
+    'Verschil',
+    'Procentueel Verschil'
+  ]);
+  
+  const currentWeekData = {};
+  changes.forEach(change => {
+    currentWeekData[change.excludedFrom] = (currentWeekData[change.excludedFrom] || 0) + 1;
+  });
+  
+  const lastWeekData = getLastWeekData();
+  
+  const comparisonData = [];
+  const allAdGroups = [...new Set([
+    ...Object.keys(currentWeekData),
+    ...Object.keys(lastWeekData)
+  ])];
+  
+  allAdGroups.forEach(adGroup => {
+    const thisWeek = currentWeekData[adGroup] || 0;
+    const lastWeek = lastWeekData[adGroup] || 0;
+    const difference = thisWeek - lastWeek;
+    const percentChange = lastWeek > 0 
+      ? ((difference / lastWeek) * 100).toFixed(1)
+      : thisWeek > 0 ? '∞' : '0';
+    
+    comparisonData.push({
+      adGroup: adGroup,
+      thisWeek: thisWeek,
+      lastWeek: lastWeek,
+      difference: difference,
+      percentChange: percentChange
+    });
+  });
+  
+  comparisonData.sort((a, b) => {
+    if (a.percentChange === '∞') return -1;
+    if (b.percentChange === '∞') return 1;
+    return parseFloat(b.percentChange) - parseFloat(a.percentChange);
+  });
+  
+  comparisonData.forEach(row => {
+    trendSheet.appendRow([
+      row.adGroup,
+      row.thisWeek,
+      row.lastWeek,
+      row.difference,
+      row.percentChange === '∞' ? '∞' : row.percentChange + '%'
+    ]);
+  });
+  
+  trendSheet.getRange(1, 1, 1, 5).setBackground('#4285f4').setFontColor('white').setFontWeight('bold');
+  trendSheet.autoResizeColumns(1, 5);
+}
+
+function getLastWeekData() {
+  const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.spreadsheetUrl);
+  const sheet = spreadsheet.getSheetByName('Uitgevoerde Uitsluitingen');
+  const lastRow = sheet.getLastRow();
+  
+  const lastWeekData = {};
+  if (lastRow > 1) {
+    const data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+    data.forEach(row => {
+      const excludedAdGroup = row[5];
+      if (excludedAdGroup) {
+        lastWeekData[excludedAdGroup] = (lastWeekData[excludedAdGroup] || 0) + 1;
+      }
+    });
+  }
+  
+  return lastWeekData;
+}
+
+function generateAsciiChart(changes) {
+  if (!changes || changes.length === 0) {
+    return 'Geen wijzigingen deze week';
+  }
+
+  const adGroupCounts = {};
+  changes.forEach(change => {
+    adGroupCounts[change.excludedFrom] = (adGroupCounts[change.excludedFrom] || 0) + 1;
+  });
+  
+  let chart = '';
+  Object.entries(adGroupCounts)
+    .sort(([,a], [,b]) => b - a)
+    .forEach(([adGroup, count]) => {
+      const bars = '█'.repeat(Math.min(count * 2, 40));
+      chart += `${adGroup.padEnd(30)} |${bars} (${count})\n`;
+    });
+  
+  return chart || 'Geen wijzigingen deze week';
+}
+
+function getTrendAnalysis(currentChanges) {
+  const lastWeekData = getLastWeekData();
+  const lastWeekTotal = Object.values(lastWeekData).reduce((a, b) => a + b, 0);
+  
+  if (!currentChanges || currentChanges.length === 0) {
+    return {
+      direction: '-',
+      percentage: 0,
+      message: 'geen wijzigingen'
+    };
+  }
+  
+  const percentageChange = lastWeekTotal > 0 
+    ? ((currentChanges.length - lastWeekTotal) / lastWeekTotal * 100).toFixed(1)
+    : 0;
+  
+  return {
+    direction: currentChanges.length > lastWeekTotal ? '↑' : '↓',
+    percentage: Math.abs(percentageChange),
+    message: `${currentChanges.length > lastWeekTotal ? 'meer' : 'minder'} wijzigingen`
+  };
+}
+
+function sendEmailReport(results) {
+  const today = new Date();
+  const trend = getTrendAnalysis(results.significantChanges);
+  
+  let html = `
+    <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; }
+          .header { background-color: #4285f4; color: white; padding: 20px; }
+          .summary { background-color: #f8f9fa; padding: 15px; margin: 20px 0; }
+          .alert { background-color: #fce8e6; color: #ea4335; padding: 15px; margin: 20px 0; }
+          .review { background-color: #fff3e0; padding: 15px; margin: 20px 0; border-left: 4px solid #e65100; }
+          .link { color: #1a73e8; text-decoration: none; }
+          .link:hover { text-decoration: underline; }
+          .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin: 20px 0; }
+          .metric-card { background: white; padding: 15px; border: 1px solid #ddd; border-radius: 4px; }
+          .trend-up { color: #34a853; }
+          .trend-down { color: #ea4335; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h2>Wekelijkse Levenshtein Distance AdGroup Rapport</h2>
+          <p>Gegenereerd op: ${today.toLocaleDateString()}</p>
+        </div>
+        
+        <div class="summary">
+          <h3>Samenvatting</h3>
+          <p>Aantal automatische wijzigingen: ${results.significantChanges.length}</p>
+          <p>Aantal cases voor review: ${results.reviewNeeded.length}</p>
+          <p><a class="link" href="${CONFIG.spreadsheetUrl}">Bekijk volledige rapport in Google Spreadsheet →</a></p>
+        </div>
+
+        <div class="metrics">
+          <div class="metric-card">
+            <h4>Trend vs Vorige Week</h4>
+            <p><span class="${trend.direction === '↑' ? 'trend-up' : 'trend-down'}">${trend.direction} ${trend.percentage}%</span> ${trend.message}</p>
+            <p><a class="link" href="${CONFIG.spreadsheetUrl}#gid=1">Bekijk trend analyse per advertentiegroep →</a></p>
+          </div>
+        </div>
+        
+        ${results.significantChanges.length >= CONFIG.minimumChangesForAlert ? `
+          <div class="alert">
+            <strong>Let op:</strong> Er zijn ${results.significantChanges.length} automatische wijzigingen aangebracht, 
+            wat boven de drempelwaarde van ${CONFIG.minimumChangesForAlert} ligt.
+          </div>
+        ` : ''}
+        
+        ${results.reviewNeeded.length > 0 ? `
+          <div class="review">
+            <h3>🔍 Review Nodig</h3>
+            <p>${results.reviewNeeded.length} zoektermen hebben handmatige review nodig.</p>
+            <p><a class="link" href="${CONFIG.spreadsheetUrl}#gid=2">Bekijk review lijst →</a></p>
+          </div>
+        ` : ''}
+        
+        <div style="margin: 20px 0;">
+          <h3>Automatische Wijzigingen per Advertentiegroep</h3>
+          <pre>${generateAsciiChart(results.significantChanges)}</pre>
+        </div>
+      </body>
+    </html>
+  `;
+  
+  MailApp.sendEmail({
+    to: CONFIG.emailAddresses.join(','),
+    subject: `Wekelijkse Levenshtein Distance AdGroup Rapport - ${today.toLocaleDateString()}`,
+    htmlBody: html
+  });
+}
+function excludeSearchTerm(adGroupId, searchTerm) {
+  const adGroup = AdsApp.adGroups().withIds([adGroupId]).get().next();
+  adGroup.createNegativeKeyword(searchTerm);
+}
