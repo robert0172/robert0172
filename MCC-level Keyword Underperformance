@@ -1,0 +1,141 @@
+// MCC-level Keyword Underperformance Script
+const SHEET_URL = 'https://docs.google.com/spreadsheets/d/13wwVcwDDq40odGIZ7J8EgkbTf9RBd5xX2a7BGW07oKI/edit?gid=0#gid=0'; // Replace with your Google Sheet URL
+const ROAS_THRESHOLD = 1.5; // Define ROAS threshold for underperformance.
+const EMAIL_ADDRESSES = ['robert.creutzburg@skydreams.nl']; // Replace with actual emails
+
+function main() {
+  const accounts = MccApp.accounts().get();
+  let spreadsheet = getOrCreateSpreadsheet();
+
+  while (accounts.hasNext()) {
+    const account = accounts.next();
+    MccApp.select(account);
+    const accountName = account.getName();
+    let accountSheet = getOrCreateSheet(spreadsheet, accountName);
+
+    processAccount(accountSheet);
+  }
+formatSheet
+  // Send summary email after processing all accounts.
+  sendSummaryEmail(spreadsheet);
+}
+
+function getOrCreateSpreadsheet() {
+  if (!SHEET_URL) {
+    const newSheet = SpreadsheetApp.create('MCC Keyword Performance Report');
+    Logger.log(`Please set SHEET_URL in your script to: ${newSheet.getUrl()}`);
+    return newSheet;
+  }
+  return SpreadsheetApp.openByUrl(SHEET_URL);
+}
+
+function getOrCreateSheet(spreadsheet, sheetName) {
+  let sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+    sheet.appendRow(['Campaign', 'Ad Group', 'Keyword', 'Clicks', 'Cost (€)', 'Conversion Value (€)', 'Keyword ROAS', 'Average Ad Group ROAS', 'ROAS Difference (%)']);
+  } else {
+    sheet.clear();  // Clear previous data if re-running the script
+    sheet.appendRow(['Campaign', 'Ad Group', 'Keyword', 'Clicks', 'Cost (€)', 'Conversion Value (€)', 'Keyword ROAS', 'Average Ad Group ROAS', 'ROAS Difference (%)']);
+  }
+  return sheet;
+}
+
+function processAccount(sheet) {
+  const report = AdsApp.report(`
+    SELECT 
+      campaign.name, 
+      ad_group.name,
+      ad_group_criterion.keyword.text, 
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.conversions_value
+    FROM 
+      keyword_view
+    WHERE 
+      ad_group_criterion.status = 'ENABLED'
+      AND metrics.clicks > 50
+      AND segments.date DURING LAST_30_DAYS
+  `);
+
+  const rows = report.rows();
+  while (rows.hasNext()) {
+    const row = rows.next();
+    const clicks = parseInt(row['metrics.clicks']);
+    const cost = Math.round(parseFloat(row['metrics.cost_micros']) / 1e6); // Convert from micros and round
+    const conversionValue = Math.round(parseFloat(row['metrics.conversions_value'])); // Round to nearest integer
+    const keywordROAS = conversionValue / cost;
+
+    // Calculate the average ROAS for the Ad Group
+    const avgAdGroupROAS = getAverageAdGroupROAS(row['campaign.name'], row['ad_group.name']);
+    const roasDifference = ((keywordROAS - avgAdGroupROAS) / avgAdGroupROAS) * 100;
+
+    // Log only underperforming keywords
+    if (keywordROAS < avgAdGroupROAS) {
+      sheet.appendRow([
+        row['campaign.name'],
+        row['ad_group.name'],
+        row['ad_group_criterion.keyword.text'],
+        clicks,
+        `€${cost}`,               // Cost with Euro sign
+        `€${conversionValue}`,     // Conversion Value with Euro sign
+        keywordROAS.toFixed(2),
+        avgAdGroupROAS.toFixed(2),
+        roasDifference.toFixed(2)
+      ]);
+    }
+  }
+}
+
+function getAverageAdGroupROAS(campaignName, adGroupName) {
+  const report = AdsApp.report(`
+    SELECT 
+      ad_group.name,
+      metrics.cost_micros, 
+      metrics.conversions_value
+    FROM 
+      ad_group
+    WHERE 
+      campaign.name = '${campaignName}'
+      AND ad_group.name = '${adGroupName}'
+      AND metrics.clicks > 0
+      AND segments.date DURING LAST_30_DAYS
+  `);
+
+  let totalCost = 0;
+  let totalConversionValue = 0;
+  const rows = report.rows();
+  
+  while (rows.hasNext()) {
+    const row = rows.next();
+    totalCost += parseFloat(row['metrics.cost_micros']) / 1e6; // Convert from micros
+    totalConversionValue += parseFloat(row['metrics.conversions_value']);
+  }
+
+  return totalCost > 0 ? totalConversionValue / totalCost : 0;
+}
+
+function sendSummaryEmail(spreadsheet) {
+  const emailBody = [];
+  const sheets = spreadsheet.getSheets();
+  
+  sheets.forEach(sheet => {
+    const accountName = sheet.getName();
+    const range = sheet.getDataRange();
+    const data = range.getValues();
+    if (data.length > 1) {
+      emailBody.push(`Account: ${accountName}`);
+      data.slice(1).forEach(row => {
+        emailBody.push(`Campaign: ${row[0]}, Ad Group: ${row[1]}, Keyword: ${row[2]}, Clicks: ${row[3]}, Cost: ${row[4]}, Conversion Value: ${row[5]}, ROAS: ${row[6]}, Avg ROAS: ${row[7]}, Difference: ${row[8]}`);
+      });
+      emailBody.push('\n');
+    }
+  });
+  
+  MailApp.sendEmail({
+    to: EMAIL_ADDRESSES.join(','),
+    subject: 'MCC Underperforming Keywords - Last 30 Days',
+    body: `${emailBody.join('\n')}\n\nView the full report here: ${SHEET_URL}`,
+    attachments: [spreadsheet.getAs(MimeType.PDF)]
+  });
+}
