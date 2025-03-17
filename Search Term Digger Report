@@ -1,0 +1,183 @@
+function main() {
+  // Updated Google Sheets URL
+  var spreadsheetUrl = 'https://docs.google.com/spreadsheets/d/1FyduDUVdEaRDSe78P3_nIGh-QX9eI07rBhUGwO0uPFk/edit?gid=1974685289#gid=1974685289';
+  
+  // Search Term Data
+  populateSearchTermData(spreadsheetUrl, 'Search Term Data L365D', 365, true, 0);  // Filter by conversions
+  populateSearchTermData(spreadsheetUrl, 'Search Term Data L7D', 7, false, 1);     // 1 click or more
+  populateSearchTermData(spreadsheetUrl, 'Search Term Data L14D', 14, false, 1);   // 1 click or more
+  populateSearchTermData(spreadsheetUrl, 'Search Term Data L28D', 28, false, 1);   // 1 click or more
+  
+  // Keyword Data
+  populateKeywordData(spreadsheetUrl, 'Keyword Data L7D', 7);
+  populateKeywordData(spreadsheetUrl, 'Keyword Data L14D', 14);
+  populateKeywordData(spreadsheetUrl, 'Keyword Data L28D', 28);
+}
+
+// Function to pull and populate unique Search Term Data for specified days
+function populateSearchTermData(spreadsheetUrl, sheetName, days, filterByConversions, minClicks) {
+  var sheet = SpreadsheetApp.openByUrl(spreadsheetUrl).getSheetByName(sheetName);
+  
+  // Clear specific columns without affecting other content, if rows exist
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {  // Ensure there's data to clear beyond headers
+    sheet.getRange(2, 1, lastRow - 1, 5).clearContent();
+  }
+  
+  var endDate = new Date();
+  endDate.setDate(endDate.getDate() - 1);
+  var startDate = new Date(endDate);
+  startDate.setDate(endDate.getDate() - (days - 1));
+
+  var reportQuery = {
+    'reportType': 'SEARCH_QUERY_PERFORMANCE_REPORT',
+    'dateRange': {
+      'startDate': formatDate(startDate),
+      'endDate': formatDate(endDate)
+    },
+    'columns': [
+      'Query',
+      'Impressions',
+      'Clicks',
+      'Cost',
+      'Conversions'
+    ]
+  };
+
+  var report = AdsApp.report(queryToText(reportQuery));
+  var rows = report.rows();
+  var data = [['Search Term', 'Impressions', 'Clicks', 'Cost', 'Conversions']];
+  var searchTermData = {};
+
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var conversions = parseFloat(row['Conversions']);
+    var clicks = parseFloat(row['Clicks']);
+    var searchTerm = row['Query'];
+
+    // Apply filters: by conversions if specified, and by minimum clicks
+    if ((!filterByConversions || conversions >= 0.01) && clicks >= minClicks) {
+      if (!searchTermData[searchTerm]) {
+        searchTermData[searchTerm] = {
+          Impressions: 0,
+          Clicks: 0,
+          Cost: 0,
+          Conversions: 0
+        };
+      }
+      // Aggregate data for each unique search term
+      searchTermData[searchTerm].Impressions += parseFloat(row['Impressions']);
+      searchTermData[searchTerm].Clicks += clicks;
+      searchTermData[searchTerm].Cost += parseFloat(row['Cost']);
+      searchTermData[searchTerm].Conversions += conversions;
+    }
+  }
+
+  for (var term in searchTermData) {
+    data.push([
+      term,
+      searchTermData[term].Impressions,
+      searchTermData[term].Clicks,
+      searchTermData[term].Cost,
+      searchTermData[term].Conversions
+    ]);
+  }
+
+  data = data.slice(1).sort((a, b) => b[4] - a[4]);
+  data.unshift(['Search Term', 'Impressions', 'Clicks', 'Cost', 'Conversions']);
+  sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+}
+
+// Function to pull and populate Keyword Data with match type for specified days
+function populateKeywordData(spreadsheetUrl, sheetName, days) {
+  var sheet = SpreadsheetApp.openByUrl(spreadsheetUrl).getSheetByName(sheetName);
+  
+  // Clear specific columns without affecting other content, if rows exist
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {  // Ensure there's data to clear beyond headers
+    sheet.getRange(2, 1, lastRow - 1, 6).clearContent();
+  }
+  
+  var endDate = new Date();
+  endDate.setDate(endDate.getDate() - 1);
+  var startDate = new Date(endDate);
+  startDate.setDate(endDate.getDate() - (days - 1));
+
+  var reportQuery = {
+    'reportType': 'KEYWORDS_PERFORMANCE_REPORT',
+    'dateRange': {
+      'startDate': formatDate(startDate),
+      'endDate': formatDate(endDate)
+    },
+    'columns': [
+      'Criteria',
+      'Impressions',
+      'Clicks',
+      'Cost',
+      'Conversions',
+      'KeywordMatchType'
+    ]
+  };
+
+  var report = AdsApp.report(queryToText(reportQuery));
+  var rows = report.rows();
+  var data = [['Keyword', 'Match Type', 'Impressions', 'Clicks', 'Cost', 'Conversions']];
+  var keywordData = {};
+
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var clicks = parseFloat(row['Clicks']);
+    var keyword = row['Criteria'];
+    var matchType = row['KeywordMatchType'];
+
+    if (clicks >= 1) {
+      if (!keywordData[keyword]) {
+        keywordData[keyword] = {
+          Impressions: 0,
+          Clicks: 0,
+          Cost: 0,
+          Conversions: 0,
+          MatchType: matchType
+        };
+      }
+      // Aggregate data for each unique keyword
+      keywordData[keyword].Impressions += parseFloat(row['Impressions']);
+      keywordData[keyword].Clicks += clicks;
+      keywordData[keyword].Cost += parseFloat(row['Cost']);
+      keywordData[keyword].Conversions += parseFloat(row['Conversions']);
+    }
+  }
+
+  for (var kw in keywordData) {
+    data.push([
+      kw,
+      keywordData[kw].MatchType,
+      keywordData[kw].Impressions,
+      keywordData[kw].Clicks,
+      keywordData[kw].Cost,
+      keywordData[kw].Conversions
+    ]);
+  }
+
+  // Sort data by Conversions in descending order
+  data = data.slice(1).sort((a, b) => b[5] - a[5]);
+  data.unshift(['Keyword', 'Match Type', 'Impressions', 'Clicks', 'Cost', 'Conversions']);
+  sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+}
+
+// Helper function to format dates into yyyyMMdd format
+function formatDate(date) {
+  var year = date.getFullYear();
+  var month = ('0' + (date.getMonth() + 1)).slice(-2);
+  var day = ('0' + date.getDate()).slice(-2);
+  return year + month + day;
+}
+
+// Helper function to convert the report query object to a query string
+function queryToText(query) {
+  var queryText = '';
+  queryText += 'SELECT ' + query.columns.join(', ');
+  queryText += ' FROM ' + query.reportType;
+  queryText += ' DURING ' + query.dateRange.startDate + ',' + query.dateRange.endDate;
+  return queryText;
+}
