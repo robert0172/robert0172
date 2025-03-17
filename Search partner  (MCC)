@@ -4,23 +4,37 @@ var SEND_EMAIL = true;
 var EMAIL_SUBJECT = "Search Partners Performance Alert";
 var EMAIL_BODY_TEMPLATE = "..."; // Uw bestaande e-mail sjabloon
 
+// Functie om CostMicros om te zetten naar standaard valuta
+function convertMoney(micros) {
+  return micros / 1000000;
+}
+
+// Functie om datum naar 'YYYYMMDD' formaat om te zetten
+function formatDateForQuery(dateString) {
+  var date = new Date(dateString);
+  var year = date.getFullYear();
+  var month = ('0' + (date.getMonth() + 1)).slice(-2);
+  var day = ('0' + date.getDate()).slice(-2);
+  return year + month + day;
+}
+
 function main() {
   Logger.log("Script gestart");
   var ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
-  var sheet = ss.getSheetByName('searchpartners');
+  var sheet = ss.getSheetByName('searchpartners'); // Je master sheet
   var data = sheet.getDataRange().getValues();
 
   var accountFlags = {};
   for (var i = 1; i < data.length; i++) {
-    var accountId = data[i][0];
+    var accountId = data[i][0]; // ACCOUNT ID kolom
     if (accountId) {
       accountFlags[accountId] = {
-        campaignLabel: data[i][1] || '',
-        reportUrl: data[i][2],
-        clickThreshold: data[i][3] || 0,
-        cpaDiffThreshold: data[i][4] || 0,
-        period: data[i][5] || 'LAST_365_DAYS',
-        emailAddresses: data[i][6] || DEFAULT_EMAIL_ADDRESS,
+        campaignLabel: data[i][1] || '', // CAMPAIGN LABEL kolom
+        reportUrl: data[i][2], // REPORT URL kolom
+        clickThreshold: data[i][3] || 0, // CLICK THRESHOLD kolom
+        cpaDiffThreshold: data[i][4] || 0, // CPA DIFF THRESHOLD kolom
+        period: formatDateForQuery(data[i][5].split(" - ")[0]) + "," + formatDateForQuery(data[i][5].split(" - ")[1]), // Datumformaat omzetten naar YYYYMMDD
+        emailAddresses: data[i][6] || DEFAULT_EMAIL_ADDRESS, // EMAIL ADDRESSES kolom
         rowIndex: i + 1 // Bewaar de rij-index voor later gebruik
       };
     }
@@ -59,12 +73,15 @@ function processClientAccount() {
   var accountIssues = [];
 
   try {
-    var accountSheet = SpreadsheetApp.openByUrl(flags.reportUrl).getActiveSheet();
-    accountSheet.clear();
-    var header = ["Account Name", "Campaign Name", "Clicks GoogleNetwork", "Clicks SearchPartners", "Diff", "Avg CPC GoogleNetwork", "Avg CPC SearchPartners", "Diff", "Cost GoogleNetwork", "Cost SearchPartners", "Diff", "Conversions GoogleNetwork", "Conversions SearchPartners", "Diff", "Cost/Conv GoogleNetwork", "Cost/Conv SearchPartners", "Diff"];
-    accountSheet.appendRow(header);
+    var accountSheet = SpreadsheetApp.openByUrl(flags.reportUrl).getActiveSheet(); // Open de report URL sheet
+    accountSheet.clear(); // Maak de sheet schoon voordat nieuwe data wordt ingevuld
+    var header = ["Account Name", "Campaign Name", "Clicks GoogleNetwork", "Clicks SearchPartners", "Diff", 
+                  "Avg CPC GoogleNetwork", "Avg CPC SearchPartners", "Diff", "Cost GoogleNetwork", 
+                  "Cost SearchPartners", "Diff", "Conversions GoogleNetwork", "Conversions SearchPartners", 
+                  "Diff", "Cost/Conv GoogleNetwork", "Cost/Conv SearchPartners", "Diff"];
+    accountSheet.appendRow(header); // Voeg de headers toe aan de sheet
 
-    var campaignIds = getCampaignIdsWithLabel(flags.campaignLabel);
+    var campaignIds = getCampaignIdsWithLabel(flags.campaignLabel); // Haal campagnes op met het label
     Logger.log("Aantal campagnes gevonden met label '" + flags.campaignLabel + "': " + campaignIds.length);
     if (campaignIds.length === 0) {
       Logger.log("Geen campagnes gevonden met label: " + flags.campaignLabel);
@@ -72,7 +89,7 @@ function processClientAccount() {
     }
 
     var report = AdsApp.report(
-      'SELECT CampaignName, CampaignId, Clicks, Cost, AverageCpc, Conversions ' +
+      'SELECT CampaignName, CampaignId, Clicks, CostMicros, AverageCpc, Conversions ' +
       'FROM CAMPAIGN_PERFORMANCE_REPORT ' +
       'WHERE CampaignStatus = "ENABLED" ' +
       'AND AdNetworkType2 = "SEARCH_PARTNERS" ' +
@@ -86,7 +103,7 @@ function processClientAccount() {
     while (rows.hasNext()) {
       var row = rows.next();
       var conversions = parseFloat(row['Conversions']);
-      var cost = parseFloat(row['Cost']);
+      var cost = convertMoney(parseFloat(row['CostMicros'])); // Kosten omzetten van micros naar valuta
       var costPerConversion = conversions > 0 ? cost / conversions : 0;
 
       var campaignSearchPartnerStatsObj = {
@@ -134,8 +151,7 @@ function processClientAccount() {
               campaignSearchPartnerStatsObj.costPerConversion.toFixed(2),
               ((campaignSearchPartnerStatsObj.costPerConversion - campaignGoogleNetworkStatsObj.costPerConversion) / campaignGoogleNetworkStatsObj.costPerConversion).toFixed(2)
             ];
-            accountIssues.push(issue);
-            accountSheet.appendRow(issue);
+            accountSheet.appendRow(issue); // Vul de gegevens in de REPORT sheet in
           }
         }
       }
@@ -144,7 +160,7 @@ function processClientAccount() {
     var returnValue = JSON.stringify({
       accountName: accountName,
       accountId: accountId,
-      issues: accountIssues,
+      issues: [],
       error: null
     });
     Logger.log("Returning from processClientAccount: " + returnValue);
@@ -160,82 +176,43 @@ function processClientAccount() {
   }
 }
 
+// Functie om resultaten te verwerken nadat alle client-accounts zijn verwerkt
 function afterProcessAllClientAccounts(results) {
   Logger.log("afterProcessAllClientAccounts gestart");
-  
+
   var scriptProperties = PropertiesService.getScriptProperties();
-  var originalInput = scriptProperties.getProperty('inputData');
-  
-  if (!originalInput) {
-    Logger.log("originalInput is undefined, skipping JSON parsing.");
+  var inputString = scriptProperties.getProperty('inputData');
+
+  if (!inputString) {
+    Logger.log("Geen input gevonden, het script stopt hier.");
     return;
   }
-  
-  Logger.log("Ontvangen originalInput: " + originalInput);
-  
-  var input;
-  try {
-    input = JSON.parse(originalInput);
-    Logger.log("Succesvolle JSON parse van originalInput");
-  } catch (e) {
-    Logger.log("Fout bij het parsen van originalInput: " + e.message);
-    return;
-  }
-  
+
+  var input = JSON.parse(inputString);
   var accountFlags = input.accountFlags;
-  var startTime = new Date(input.startTime);
-  var endTime = new Date();
-  var executionTimeInSeconds = (endTime - startTime) / 1000;
 
-  var allIssues = [];
-  var masterSheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL).getSheetByName('searchpartners');
+  Logger.log("Aantal resultaten ontvangen: " + results.length);
   
-  Logger.log("Aantal ontvangen resultaten: " + results.length);
-  results.forEach(function(result, index) {
-    Logger.log("Verwerking van resultaat " + (index + 1));
-    if (result.getReturnValue()) {
-      var accountResult;
-      try {
-        accountResult = JSON.parse(result.getReturnValue());
-        Logger.log("Succesvolle parse van resultaat voor account: " + accountResult.accountName);
-      } catch (e) {
-        Logger.log("Fout bij het parsen van resultaat: " + e.message);
-        return;
-      }
-      
-      allIssues = allIssues.concat(accountResult.issues);
+  var masterSheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL).getSheetByName('searchpartners');
 
-      // Update de mastersheet met de uitvoeringstijd en foutmelding
-      var flags = accountFlags[accountResult.accountId];
-      if (flags) {
-        var rowIndex = flags.rowIndex;
-        masterSheet.getRange(rowIndex, 8).setValue(new Date().toLocaleString()); // LastRun in MCCTIME
-        masterSheet.getRange(rowIndex, 9).setValue(accountResult.error || ''); // Error message
-        Logger.log("Mastersheet bijgewerkt voor account: " + accountResult.accountName);
-      } else {
-        Logger.log("Geen flags gevonden voor account: " + accountResult.accountName);
-      }
-    } else {
-      Logger.log("Geen returnwaarde voor resultaat " + (index + 1));
+  results.forEach(function(result, index) {
+    var resultData = JSON.parse(result.getReturnValue());
+    Logger.log("Resultaat voor account: " + resultData.accountName);
+
+    if (resultData.error) {
+      Logger.log("Fout bij verwerken van account: " + resultData.accountName + " - Fout: " + resultData.error);
+    }
+
+    // Update de laatste uitvoertijd in de master sheet
+    var flags = accountFlags[resultData.accountId];
+    if (flags) {
+      var rowIndex = flags.rowIndex;
+      masterSheet.getRange(rowIndex, 8).setValue(new Date().toLocaleString()); // LastRun in MCCTIME
+      masterSheet.getRange(rowIndex, 9).setValue(resultData.error || 'Processed'); // Error message of status
     }
   });
-
-  var totalNrOfIssues = allIssues.length;
-
-  if (totalNrOfIssues > 0 && SEND_EMAIL) {
-    var emailBody = EMAIL_BODY_TEMPLATE
-      .replace("{CLICK_THRESHOLD}", accountFlags[Object.keys(accountFlags)[0]].clickThreshold)
-      .replace("{PERIOD}", accountFlags[Object.keys(accountFlags)[0]].period)
-      .replace("{CPA_DIFF_THRESHOLD}", accountFlags[Object.keys(accountFlags)[0]].cpaDiffThreshold)
-      .replace("{SPREADSHEET_URL}", SPREADSHEET_URL)
-      .replace("{EMAIL_ADDRESSES}", DEFAULT_EMAIL_ADDRESS);
-
-    MailApp.sendEmail(DEFAULT_EMAIL_ADDRESS, EMAIL_SUBJECT, emailBody);
-    Logger.log("E-mail verzonden naar: " + DEFAULT_EMAIL_ADDRESS);
-  }
-
-  Logger.log("Totaal aantal problemen gevonden: " + totalNrOfIssues);
-  Logger.log("Totale uitvoeringstijd: " + executionTimeInSeconds + " seconden");
+  
+  Logger.log("Verwerking van alle client-accounts voltooid.");
 }
 
 function getCampaignIdsWithLabel(label) {
@@ -256,38 +233,6 @@ function getCampaignIdsWithLabel(label) {
   }
   Logger.log("Aantal campagne IDs gevonden: " + campaignIds.length);
   return campaignIds;
-}
-
-function getCampaignGoogleNetworkStats(campaignIds, period) {
-  Logger.log("getCampaignGoogleNetworkStats aangeroepen voor " + campaignIds.length + " campagnes");
-  var report = AdsApp.report(
-    'SELECT CampaignName, CampaignId, Clicks, Cost, AverageCpc, Conversions ' +
-    'FROM CAMPAIGN_PERFORMANCE_REPORT ' +
-    'WHERE CampaignId IN [' + campaignIds.join(",") + ']' +
-    ' AND AdNetworkType2 = "SEARCH" ' +
-    ' DURING ' + period
-  );
-
-  var campaignGoogleNetworkStatsObjArray = [];
-  var rows = report.rows();
-  while (rows.hasNext()) {
-    var row = rows.next();
-    var conversions = parseFloat(row['Conversions']);
-    var cost = parseFloat(row['Cost']);
-    var campaignGoogleNetworkStatsObj = {
-      campaignName: row['CampaignName'],
-      campaignId: row['CampaignId'],
-      clicks: parseInt(row['Clicks']),
-      cost: cost,
-      avgcpc: parseFloat(row['AverageCpc']),
-      conversions: conversions,
-      costPerConversion: conversions > 0 ? cost / conversions : 0
-    };
-
-    campaignGoogleNetworkStatsObjArray.push(campaignGoogleNetworkStatsObj);
-  }
-  Logger.log("Aantal campagnes met Google Network stats: " + campaignGoogleNetworkStatsObjArray.length);
-  return campaignGoogleNetworkStatsObjArray;
 }
 
 function getObject(array, campaignId) {
