@@ -1,0 +1,288 @@
+// Duplicate Query Checker across accounts (MCC)
+//
+// ABOUT THE SCRIPT
+// Check for duplicate search terms across accounts
+//
+////////////////////////////////////////////////////////////////////
+
+var config = {
+
+    SPREADSHEET_URL: 'https://docs.google.com/spreadsheets/d/1GquKjOqzS79F2ZVCR-J_nUss9_IQdrF_RhrOFcKCHqA/edit?gid=0#gid=0',
+    // The URL of the Google Sheet the results will be put into.
+    // This can be an empty Google Sheet
+
+    ACCOUNT_IDS: ['160-381-4612', '537-324-9595', '439-535-2680', '611-845-0249', '736-812-6241', '598-248-8525', '436-717-6100'],
+    LABEL_NAME: '',
+    // Pick you preferred method of selecting accounts
+    // Fill in the account ID's or apply a label to the account you want to check
+    // Leave the other variable empty
+    // E.g. ACCOUNT_IDS: ['123-456-7891', '987-654-3211'] or leave empty by using []
+    // E.g. LABEL_NAME: 'script: Duplicate Query Checker' or leave empty by using ''
+
+    CAMPAIGN_NAME_CONTAINS: [],
+    // Use this if you only want to look at some campaigns.
+    // For example ["Brand"] would only look at campaigns with 'Brand' in the name,
+    // while ["Brand","Generic"] would only look at campaigns with 'Brand' or 'Generic'
+    // in the name.
+    // Leave as [] to include all campaigns.  
+
+    CAMPAIGN_NAME_DOES_NOT_CONTAIN: ["Verhuis","Broad","POAS"],
+    // Use this if you want to exclude some campaigns.
+    // For example ["Display"] would ignore any campaigns with 'Display' in the name,
+    // while ["Display","Shopping"] would ignore any campaigns with 'Display' or
+    // 'Shopping' in the name.
+    // Leave as [] to not exclude any campaigns.
+
+    IGNORE_PAUSED_CAMPAIGNS: true,
+    // Set this to true to only look at currently active campaigns.
+    // Set to false to also include campaigns that are currently paused. 
+
+    IMPRESSION_TRESHOLD: 30,
+    // Only queries with more than this number of impressions will be looked at.
+    // Set as 0 to look at all available queries.
+
+    DATE_RANGE: 'LAST_30_DAYS',
+    // Pick your desired date range. See options here:
+    // developers.google.com/adwords/api/docs/guides/awql#formal_grammar
+
+    CROSS_ACCOUNT_ONLY: false,
+    // If 'true', show cross-account duplicates only
+    // Of 'false', show duplicates within the same account as well
+
+    IGNORE_BMM_EXACT: false,
+    BMM_IDENTIFIER: 'bmm',
+    EXACT_IDENTIFIER: 'exact'
+    // If you're structure consists of ad groups split by match type (e.g. BMM/Exact),
+    // fill in the identifiers and set IGNORE_BMM_EXACT to true to ignore these duplicates
+    // If 'true', duplicate query's in an equivalent BMM/Exact ad group will be ignored
+    // If 'false', duplicate query's in an equivalent BMM/Exact ad group will be show
+
+}
+
+////////////////////////////////////////////////////////////////////
+
+function main() {
+
+    var accountSelector;
+
+    if (config.ACCOUNT_IDS.length != 0) {
+        accountSelector = AdsManagerApp.accounts().withIds(config.ACCOUNT_IDS);
+    }
+    if (config.LABEL_NAME) {
+        accountSelector = AdsManagerApp.accounts().withCondition('LabelNames CONTAINS "' + config.LABEL_NAME + '"');
+    }
+    accountSelector.executeInParallel('processClientAccount', 'afterProcessAllClientAccounts');
+
+}
+
+/* 
+The "main function" of the script
+which is executed for each account
+and return the duplicate queries
+*/
+function processClientAccount() {
+
+    // Process the client account 
+    var campaignIds = getCampaignIds(config.IGNORE_PAUSED_CAMPAIGNS, config.CAMPAIGN_NAME_DOES_NOT_CONTAIN, config.CAMPAIGN_NAME_CONTAINS);
+    var queries = getQueries(campaignIds);
+
+    // Return the result
+    return JSON.stringify(queries);
+}
+
+/* 
+After all accounts are checked:
+Builds array of Adgroups indexed by Query. 
+Structure:
+Queries => [adGroups, CampaignId, ...], ...]
+*/
+function afterProcessAllClientAccounts(results) {
+
+    var queries = {};
+    var totalRows = [];
+
+    // Combine the returned queries from each account into one array  
+    for (var i = 0; i < results.length; i++) {
+        var result = JSON.parse(results[i].getReturnValue());
+        totalRows = totalRows.concat(result);
+    }
+
+    for (var j = 0; j < totalRows.length; j++) {
+        var row = totalRows[j];
+
+        var metrics = [row['AccountDescriptiveName'], row['AdGroupId'], row['AdGroupName'], row['CampaignId'], row['CampaignName'], row['KeywordTextMatchingQuery'], row['Impressions'], row['Clicks'], row['Cost'], row['Conversions']]
+
+        // If the query is new...
+        if (typeof queries[row['Query']] == 'undefined') {
+            queries[row['Query']] = [metrics];
+        } else {
+            // If the duplicate is in the same account...
+            if (config.CROSS_ACCOUNT_ONLY && queries[row['Query']][0][0] == row['AccountDescriptiveName']) {
+                continue;
+            }
+            // If the duplicate is in the match type equivalent ad group...          
+            else if (config.IGNORE_BMM_EXACT && equalizer(queries[row['Query']][0][2]) == equalizer(row['AdGroupName'])) {
+                continue;
+            } else {
+                queries[row['Query']].push(metrics);
+            }
+        }
+    }
+
+    for (var property in queries) {
+        if (queries[property].length == 1) {
+            delete queries[property];
+        }
+    }
+    // return queries;  
+    Logger.log(Object.keys(queries).length + ' Search Queries appear in two or more Ad Groups.');
+
+    // Check the spreadsheet and export the results  
+    var writeSpreadsheet = checkSpreadsheet(config.SPREADSHEET_URL, 'the spreadsheet');
+    var writeSheet = writeSpreadsheet.getSheets()[0];
+    writeReport(queries, writeSheet);
+}
+
+// Check the spreadsheet URL has been entered, and that it works
+function checkSpreadsheet(spreadsheetUrl, spreadsheetName) {
+    if (spreadsheetUrl.replace(/[AEIOU]/g, "X") == 'https://docs.google.com/YXXR-SPRXXDSHXXT-XRL-HXRX') {
+        throw ('Problem with ' + spreadsheetName + ' URL: make sure you\'ve replaced the default with a valid spreadsheet URL.');
+    }
+    try {
+        var spreadsheet = SpreadsheetApp.openByUrl(spreadsheetUrl);
+
+        // Checks if you can edit the spreadsheet
+        var sheet = spreadsheet.getSheets()[0];
+        var sheetName = sheet.getName();
+        sheet.setName(sheetName);
+
+        return spreadsheet;
+    } catch (e) {
+        throw ('Problem with ' + spreadsheetName + ' URL: "' + e + '"');
+    }
+}
+
+// Get the IDs of campaigns which match the given options
+function getCampaignIds(ignorePausedCampaigns, campaignNameDoesNotContain, campaignNameContains) {
+    var whereStatement = 'WHERE ';
+    var whereStatementsArray = [];
+    var campaignIds = [];
+
+    if (ignorePausedCampaigns) {
+        whereStatement += 'CampaignStatus = ENABLED ';
+    } else {
+        whereStatement += 'CampaignStatus IN ["ENABLED", "PAUSED"] ';
+    }
+
+    for (var i = 0; i < campaignNameDoesNotContain.length; i++) {
+        whereStatement += 'AND CampaignName DOES_NOT_CONTAIN_IGNORE_CASE "' + campaignNameDoesNotContain[i].replace(/"/g, '\\\"') + '" ';
+    }
+
+    if (campaignNameContains.length == 0) {
+        whereStatementsArray = [whereStatement];
+    } else {
+        for (var i = 0; i < campaignNameContains.length; i++) {
+            whereStatementsArray.push(whereStatement + 'AND CampaignName CONTAINS_IGNORE_CASE "' + campaignNameContains[i].replace(/"/g, '\\\"') + '" ');
+        }
+    }
+
+    for (var i = 0; i < whereStatementsArray.length; i++) {
+        var campaignReport = AdWordsApp.report(
+            ' SELECT CampaignId ' +
+            ' FROM CAMPAIGN_PERFORMANCE_REPORT ' +
+            whereStatementsArray[i] +
+            'DURING ' + config.DATE_RANGE);
+
+        var rows = campaignReport.rows();
+        while (rows.hasNext()) {
+            var row = rows.next();
+            campaignIds.push(row['CampaignId']);
+        }
+    }
+
+    if (campaignIds.length == 0) {
+        throw ('No campaigns found with the given settings.');
+    }
+
+    Logger.log(campaignIds.length + ' campaigns found');
+    return campaignIds;
+}
+
+/* 
+Downloads a search query performance report
+Stores data in an array. 
+Returns that array.
+*/
+function getQueries(campaignIds) {
+
+    var queries = [];
+    var report = AdWordsApp.report(
+        ' SELECT Query, AccountDescriptiveName, CampaignId, CampaignName, AdGroupId, AdGroupName, KeywordTextMatchingQuery, Impressions, Clicks, Cost, Conversions' +
+        ' FROM SEARCH_QUERY_PERFORMANCE_REPORT ' +
+        ' WHERE ' +
+        ' CampaignId IN [' + campaignIds.join(',') + ']' +
+        ' AND Impressions > ' + config.IMPRESSION_TRESHOLD +
+        ' DURING ' + config.DATE_RANGE);
+
+    var rows = report.rows();
+
+    while (rows.hasNext()) {
+        var row = rows.next();
+        if (row['KeywordTextMatchingQuery'].indexOf('==') > -1) { //The 'keyword' is a product in a Shopping campaign
+            continue;
+        }
+        queries.push(row);
+    }
+    return queries;
+}
+
+/*
+Goes through object writing each line to a sheet.
+Search Terms are ordered by total impressions.
+*/
+function writeReport(queries, writeSheet) {
+    writeSheet.clear();
+
+    var queryTotalImpressions = {};
+    for (var query in queries) {
+        var impressions = 0;
+        var metrics = queries[query];
+        for (var j = 0; j < metrics.length; j++) {
+            impressions += parseInt(metrics[j][6].replace(/,/g, ''), 10);
+        }
+        queryTotalImpressions[query] = impressions;
+    }
+    var orderedQueries = Object.keys(queries).sort(function(a, b) {
+        return queryTotalImpressions[b] - queryTotalImpressions[a];
+    });
+
+    writeSheet.getRange(1, 1, 1, 11).setValues([
+        ['Search Term', 'Account', 'AdGroup Id', 'AdGroup Name', 'Campaign Id', 'Campaign Name', 'Triggered Keyword', 'Impressions', 'Clicks', 'Cost', 'Conversions']
+    ]).setFontWeight('bold');
+
+    var vertical = 2;
+    var sizes = [];
+    for (var i in orderedQueries) {
+        sizes.push(queries[orderedQueries[i]].length);
+    }
+    for (var i in orderedQueries) {
+        var entry = orderedQueries[i];
+        var currentArrays = queries[entry];
+        var size = sizes[i];
+        writeSheet.getRange(vertical, 1).setValue(entry);
+        writeSheet.getRange(vertical, 2, size, 10).setValues(currentArrays);
+        vertical += size;
+    }
+    // Some additional formatting
+    writeSheet.getRange('A:K').setHorizontalAlignment('left');
+    writeSheet.setFrozenRows(1);
+    Logger.log('The data has been written to the sheet specified by URL provided');
+}
+
+/*
+Helper function: make ad group names equal to check for BMM / Exact duplicates
+*/
+function equalizer(adGroupName) {
+    var strippedAdGroupName = adGroupName.replace(config.EXACT_IDENTIFIER, '').replace(config.BMM_IDENTIFIER, '').toLowerCase();
+    return strippedAdGroupName;
+}
